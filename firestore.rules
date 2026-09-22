@@ -19,6 +19,7 @@ service cloud.firestore {
         && request.resource.data.role == "Operator";
 
       // Operators can update their own profile, but cannot self-promote roles.
+      // This also permits updating non-sensitive preference fields.
       allow update: if isOwner(uid)
         && request.resource.data.email == resource.data.email
         && request.resource.data.role == resource.data.role;
@@ -26,8 +27,7 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Shared operational data is available only to authenticated operators.
-    // Fine-grained role-based writes can be introduced with trusted server claims later.
+    // Shared operational records are readable/writable only by authenticated users.
     match /missions/{missionId} {
       allow read, write: if isSignedIn();
     }
@@ -44,8 +44,15 @@ service cloud.firestore {
       allow read, write: if isSignedIn();
     }
 
+    // Operator decisions are private to the account that created them.
     match /operatorFeedback/{feedbackId} {
-      allow read, write: if isSignedIn();
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid;
+
+      allow read: if isSignedIn()
+        && resource.data.uid == request.auth.uid;
+
+      allow update, delete: if false;
     }
 
     match /{document=**} {
