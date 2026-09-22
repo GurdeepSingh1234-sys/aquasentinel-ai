@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import { Search, Bell, Menu, X, Waves, Satellite } from "lucide-react"
 import {
   LayoutDashboard,
@@ -16,6 +16,7 @@ import {
   ShieldCheck,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { ThemeToggle } from "@/components/theme/theme-toggle"
 
 const titles: Record<string, { title: string; subtitle: string }> = {
   "/": { title: "Command Overview", subtitle: "Real-time marine surveillance & detection intelligence" },
@@ -43,6 +44,7 @@ const mobileNav = [
 
 export function Topbar() {
   const pathname = usePathname()
+  const router = useRouter()
   const meta = titles[pathname] ?? { title: "AquaSentinel AI", subtitle: "" }
   const [open, setOpen] = useState(false)
   const [now, setNow] = useState<string>("")
@@ -97,15 +99,26 @@ export function Topbar() {
           <span className="absolute right-2 top-2 size-2 rounded-full bg-destructive ring-2 ring-background" />
         </button>
 
-        <div className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-card/60 py-1 pl-1 pr-3">
+        <ThemeToggle />
+
+        <button
+          type="button"
+          onClick={() => {
+            window.localStorage.removeItem("aquasentinel-auth")
+            window.sessionStorage.removeItem("aquasentinel-auth")
+            router.replace("/login")
+          }}
+          className="group flex items-center gap-2.5 rounded-lg border border-border/60 bg-card/60 py-1 pl-1 pr-3 text-left transition-colors hover:bg-secondary/60"
+          title="Sign out"
+        >
           <div className="flex size-7 items-center justify-center rounded-md bg-primary/15 font-mono text-xs font-semibold text-primary">
             AR
           </div>
           <div className="hidden leading-tight sm:block">
             <p className="text-xs font-medium text-foreground">Cmdr. A. Rao</p>
-            <p className="text-[10px] text-muted-foreground">Operations Lead</p>
+            <p className="text-[10px] text-muted-foreground group-hover:text-primary">Sign out</p>
           </div>
-        </div>
+        </button>
       </div>
 
       {open ? (
