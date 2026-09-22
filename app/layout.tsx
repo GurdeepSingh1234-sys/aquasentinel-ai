@@ -2,6 +2,7 @@ import { Analytics } from "@vercel/analytics/next"
 import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
 import { AppShell } from "@/components/auth/app-shell"
+import { AuthProvider } from "@/components/auth/auth-provider"
 import { ThemeProvider } from "@/components/theme/theme-provider"
 import "./globals.css"
 
@@ -29,7 +30,9 @@ export default function RootLayout({
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} suppressHydrationWarning>
       <body className="font-sans antialiased">
         <ThemeProvider>
-          <AppShell>{children}</AppShell>
+          <AuthProvider>
+            <AppShell>{children}</AppShell>
+          </AuthProvider>
         </ThemeProvider>
         {process.env.NODE_ENV === "production" && <Analytics />}
       </body>
