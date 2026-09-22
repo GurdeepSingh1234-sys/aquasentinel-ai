@@ -65,6 +65,11 @@ export function Topbar() {
     setOpen(false)
   }, [pathname])
 
+  const handleSignOut = async () => {
+    await signOut()
+    router.replace("/login")
+  }
+
   return (
     <header className="sticky top-0 z-20 border-b border-border/60 bg-background/80 backdrop-blur-md">
       <div className="flex h-16 items-center gap-4 px-4 sm:px-6">
@@ -106,8 +111,7 @@ export function Topbar() {
         <button
           type="button"
           onClick={() => {
-            signOut()
-            router.replace("/login")
+            void handleSignOut()
           }}
           className="group flex items-center gap-2.5 rounded-lg border border-border/60 bg-card/60 py-1 pl-1 pr-3 text-left transition-colors hover:bg-secondary/60"
           title="Sign out"
