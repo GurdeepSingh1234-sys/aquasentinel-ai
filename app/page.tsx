@@ -1,3 +1,6 @@
+"use client"
+
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import {
   Waves,
@@ -8,27 +11,103 @@ import {
   ArrowRight,
   Activity,
   MapPin,
+  Cloud,
+  Loader2,
 } from "lucide-react"
 import { Panel, PanelHeader } from "@/components/ui/panel"
 import { StatCard } from "@/components/dashboard/stat-card"
 import { SonarScope } from "@/components/dashboard/sonar-scope"
 import { RiskBadge } from "@/components/dashboard/risk-badge"
 import { ActivityBars, GroupedBars, Meter } from "@/components/charts/mini-charts"
-import {
-  detections,
-  riskDistribution,
-  riskMeta,
-  sonarActivity,
-  detectionTrend,
-} from "@/lib/mock-data"
+import { riskMeta, sonarActivity, detectionTrend, type Detection, type Risk } from "@/lib/mock-data"
+import { subscribeToDetections, subscribeToMissions } from "@/lib/firestore"
 
 export default function OverviewPage() {
-  const totalRisk = riskDistribution.reduce((s, r) => s + r.count, 0)
+  const [detections, setDetections] = useState<Detection[]>([])
+  const [missionCoverage, setMissionCoverage] = useState(0)
+  const [activeSweeps, setActiveSweeps] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    let active = true
+
+    const unsubscribeDetections = subscribeToDetections(
+      (rows) => {
+        if (!active) return
+        setDetections(rows)
+        setLoading(false)
+      },
+      (subscriptionError) => {
+        if (!active) return
+        setError(subscriptionError.message || "Unable to load dashboard detections.")
+        setLoading(false)
+      },
+    )
+
+    const unsubscribeMissions = subscribeToMissions(
+      (rows) => {
+        if (!active) return
+        setMissionCoverage(rows.reduce((sum, mission) => sum + mission.coverage, 0))
+        setActiveSweeps(rows.filter((mission) => mission.status === "active").length)
+      },
+      (subscriptionError) => {
+        if (!active) return
+        setError(subscriptionError.message || "Unable to load dashboard missions.")
+      },
+    )
+
+    return () => {
+      active = false
+      unsubscribeDetections()
+      unsubscribeMissions()
+    }
+  }, [])
+
   const recent = detections.slice(0, 5)
+
+  const riskDistribution = useMemo(
+    () =>
+      (["critical", "high", "medium", "low"] as Risk[]).map((risk) => ({
+        risk,
+        count: detections.filter((detection) => detection.risk === risk).length,
+      })),
+    [detections],
+  )
+
+  const totalDetections = detections.length
+  const confirmedDetections = detections.filter((detection) => detection.status === "confirmed").length
+  const criticalHazards = detections.filter(
+    (detection) => detection.risk === "critical" && detection.status !== "dismissed",
+  ).length
+  const totalRisk = Math.max(totalDetections, 1)
 
   return (
     <div className="space-y-6">
-      {/* Hero banner */}
+      <div className="flex flex-col gap-3 rounded-xl border border-border/60 bg-card/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Cloud className="size-4" />
+          </span>
+          <div>
+            <p className="text-xs font-semibold text-foreground">Live Firestore Command Data</p>
+            <p className="text-[11px] text-muted-foreground">
+              Dashboard metrics are synchronized with authenticated mission and detection data.
+            </p>
+          </div>
+        </div>
+        <span className="inline-flex items-center gap-1.5 self-start rounded-full border border-success/25 bg-success/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wide text-success sm:self-auto">
+          <span className="size-1.5 animate-pulse rounded-full bg-success" />
+          {loading ? "Syncing" : "Connected"}
+        </span>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-xs text-destructive">
+          Dashboard data error: {error}
+        </div>
+      ) : null}
+
       <Panel className="grid-sonar relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-r from-card via-card/70 to-transparent" />
         <div className="relative flex flex-col items-start justify-between gap-6 p-6 sm:flex-row sm:items-center">
@@ -70,45 +149,46 @@ export default function OverviewPage() {
         </div>
       </Panel>
 
-      {/* Stat cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <StatCard
           label="Sonar Coverage"
-          value="128.4"
+          value={loading ? "—" : missionCoverage.toFixed(1)}
           unit="km²"
           icon={<Waves className="size-5" />}
-          delta="12.6%"
+          delta="Live"
           deltaTone="up"
           footer={
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Today</span>
-              <span className="font-mono text-primary">2 active sweeps</span>
+              <span>Mission registry</span>
+              <span className="font-mono text-primary">{activeSweeps} active sweeps</span>
             </div>
           }
         />
         <StatCard
           label="Total Detections"
-          value="145"
+          value={loading ? "—" : String(totalDetections)}
           icon={<ScanSearch className="size-5" />}
-          delta="8.3%"
+          delta="Live"
           deltaTone="up"
           footer={
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span>Confirmed</span>
-              <span className="font-mono text-success">112 verified</span>
+              <span className="font-mono text-success">{confirmedDetections} verified</span>
             </div>
           }
         />
         <StatCard
           label="Critical Hazards"
-          value="14"
+          value={loading ? "—" : String(criticalHazards)}
           icon={<ShieldAlert className="size-5" />}
-          delta="3.1%"
+          delta="Live"
           deltaTone="down"
           footer={
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Requires action</span>
-              <span className="font-mono text-destructive">5 new</span>
+              <span>Current registry</span>
+              <span className="font-mono text-destructive">
+                {criticalHazards > 0 ? "Attention" : "None"}
+              </span>
             </div>
           }
         />
@@ -117,7 +197,7 @@ export default function OverviewPage() {
           value="96.2"
           unit="%"
           icon={<Gauge className="size-5" />}
-          delta="0.4%"
+          delta="Prototype"
           deltaTone="up"
           footer={
             <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -128,9 +208,7 @@ export default function OverviewPage() {
         />
       </div>
 
-      {/* Middle grid */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Sonar activity */}
         <Panel className="lg:col-span-2">
           <PanelHeader
             title="Sonar Activity"
@@ -158,9 +236,8 @@ export default function OverviewPage() {
           </div>
         </Panel>
 
-        {/* Risk levels */}
         <Panel>
-          <PanelHeader title="Risk Levels" subtitle="Active detection classification" icon={<ShieldAlert className="size-4" />} />
+          <PanelHeader title="Risk Levels" subtitle="Live detection classification" icon={<ShieldAlert className="size-4" />} />
           <div className="space-y-4 p-5">
             {riskDistribution.map((r) => {
               const pct = Math.round((r.count / totalRisk) * 100)
@@ -188,16 +265,13 @@ export default function OverviewPage() {
               )
             })}
             <div className="mt-2 rounded-lg border border-border/60 bg-secondary/40 p-3 text-xs text-muted-foreground">
-              <span className="font-medium text-foreground">Highest concentration</span> detected in Harbour Approach —
-              Sector 7.
+              <span className="font-medium text-foreground">Data source</span> Live Firestore detection registry.
             </div>
           </div>
         </Panel>
       </div>
 
-      {/* Bottom grid */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Detection trend */}
         <Panel className="lg:col-span-1">
           <PanelHeader title="Detection Trend" subtitle="Debris vs. hazards · 7 days" icon={<Activity className="size-4" />} />
           <div className="p-5">
@@ -215,7 +289,6 @@ export default function OverviewPage() {
           </div>
         </Panel>
 
-        {/* Recent detections */}
         <Panel className="lg:col-span-2">
           <PanelHeader
             title="Recent Detections"
@@ -227,26 +300,38 @@ export default function OverviewPage() {
               </Link>
             }
           />
-          <div className="divide-y divide-border/50">
-            {recent.map((d) => (
-              <div key={d.id} className="flex items-center gap-4 px-5 py-3">
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-secondary/50 font-mono text-[10px] text-muted-foreground">
-                  {d.id.split("-")[1]}
+          {loading ? (
+            <div className="flex min-h-48 items-center justify-center text-sm text-muted-foreground">
+              <Loader2 className="mr-2 size-4 animate-spin text-primary" />
+              Syncing detection registry…
+            </div>
+          ) : (
+            <div className="divide-y divide-border/50">
+              {recent.map((detection) => (
+                <div key={detection.id} className="flex items-center gap-4 px-5 py-3">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-secondary/50 font-mono text-[10px] text-muted-foreground">
+                    {detection.id.split("-")[1]}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-foreground">{detection.object}</p>
+                    <p className="truncate font-mono text-xs text-muted-foreground">
+                      {detection.gps.lat.toFixed(4)}, {detection.gps.lng.toFixed(4)} · {detection.depth} m
+                    </p>
+                  </div>
+                  <div className="hidden text-right sm:block">
+                    <p className="font-mono text-sm text-primary">{Math.round(detection.confidence * 100)}%</p>
+                    <p className="text-[10px] text-muted-foreground">confidence</p>
+                  </div>
+                  <RiskBadge risk={detection.risk} />
                 </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-foreground">{d.object}</p>
-                  <p className="truncate font-mono text-xs text-muted-foreground">
-                    {d.gps.lat.toFixed(4)}, {d.gps.lng.toFixed(4)} · {d.depth} m
-                  </p>
+              ))}
+              {recent.length === 0 ? (
+                <div className="px-5 py-12 text-center text-sm text-muted-foreground">
+                  No detection records available.
                 </div>
-                <div className="hidden text-right sm:block">
-                  <p className="font-mono text-sm text-primary">{Math.round(d.confidence * 100)}%</p>
-                  <p className="text-[10px] text-muted-foreground">confidence</p>
-                </div>
-                <RiskBadge risk={d.risk} />
-              </div>
-            ))}
-          </div>
+              ) : null}
+            </div>
+          )}
         </Panel>
       </div>
     </div>
