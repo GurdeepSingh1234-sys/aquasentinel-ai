@@ -113,7 +113,7 @@ export function Topbar() {
           title="Sign out"
         >
           <div className="flex size-7 items-center justify-center rounded-md bg-primary/15 font-mono text-xs font-semibold text-primary">
-            AR
+            {user?.initials ?? "OP"}
           </div>
           <div className="hidden leading-tight sm:block">
             <p className="text-xs font-medium text-foreground">{user?.name ?? "Operator"}</p>
