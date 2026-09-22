@@ -1,7 +1,8 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
-import { TriangleAlert, Waves, Activity, Radio, ThermometerSun, Magnet, Cloud, Loader2 } from "lucide-react"
+import Link from "next/link"
+import { TriangleAlert, Waves, Activity, Radio, ThermometerSun, Magnet, Cloud, Loader2, X, ArrowRight } from "lucide-react"
 import { Panel, PanelHeader } from "@/components/ui/panel"
 import { RiskBadge, StatusPill } from "@/components/dashboard/risk-badge"
 import { cn } from "@/lib/utils"
@@ -25,6 +26,7 @@ const statusTone: Record<Anomaly["status"], "primary" | "warning" | "success"> =
 export default function AnomaliesPage() {
   const [tab, setTab] = useState<Anomaly["status"] | "all">("all")
   const [anomalies, setAnomalies] = useState<Anomaly[]>([])
+  const [selectedAnomaly, setSelectedAnomaly] = useState<Anomaly | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
   const [seeded, setSeeded] = useState(false)
@@ -90,14 +92,12 @@ export default function AnomaliesPage() {
           </span>
           <div>
             <p className="text-xs font-semibold text-foreground">Live Firestore Anomaly Feed</p>
-            <p className="text-[11px] text-muted-foreground">
-              Authenticated anomaly data updates in real time.
-            </p>
+            <p className="text-[11px] text-muted-foreground">Authenticated anomaly data updates in real time.</p>
           </div>
         </div>
         <span className="inline-flex items-center gap-1.5 self-start rounded-full border border-success/25 bg-success/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wide text-success sm:self-auto">
           <span className="size-1.5 animate-pulse rounded-full bg-success" />
-          Connected
+          {loading ? "Syncing" : "Connected"}
         </span>
       </div>
 
@@ -153,6 +153,7 @@ export default function AnomaliesPage() {
             </div>
           }
         />
+
         {loading ? (
           <div className="flex min-h-56 items-center justify-center">
             <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -181,19 +182,81 @@ export default function AnomaliesPage() {
                     <span>{anomaly.detectedAt}</span>
                   </div>
                 </div>
-                <button className="self-start rounded-lg border border-border/70 bg-card/60 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary/60">
+                <button
+                  onClick={() => setSelectedAnomaly(anomaly)}
+                  className="self-start rounded-lg border border-border/70 bg-card/60 px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary/60"
+                >
                   Investigate
                 </button>
               </div>
             ))}
             {rows.length === 0 ? (
-              <div className="px-5 py-12 text-center text-sm text-muted-foreground">
-                No anomalies match the selected filter.
-              </div>
+              <div className="px-5 py-12 text-center text-sm text-muted-foreground">No anomalies match the selected filter.</div>
             ) : null}
           </div>
         )}
       </Panel>
+
+      {selectedAnomaly ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/75 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-2xl rounded-2xl border border-border/70 bg-card shadow-2xl">
+            <div className="flex items-start justify-between border-b border-border/60 px-5 py-4">
+              <div>
+                <p className="text-lg font-semibold text-foreground">{selectedAnomaly.type}</p>
+                <p className="mt-1 font-mono text-xs text-muted-foreground">{selectedAnomaly.id}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedAnomaly(null)}
+                className="flex size-8 items-center justify-center rounded-lg border border-border/60 text-muted-foreground hover:text-foreground"
+                aria-label="Close investigation"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+
+            <div className="space-y-5 p-5">
+              <div className="grid gap-3 sm:grid-cols-3">
+                <div className="rounded-lg border border-border/60 bg-secondary/30 p-3">
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Severity</p>
+                  <div className="mt-1"><RiskBadge risk={selectedAnomaly.severity} /></div>
+                </div>
+                <div className="rounded-lg border border-border/60 bg-secondary/30 p-3">
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Confidence</p>
+                  <p className="mt-1 font-mono text-lg text-primary">{Math.round(selectedAnomaly.confidence * 100)}%</p>
+                </div>
+                <div className="rounded-lg border border-border/60 bg-secondary/30 p-3">
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Detected</p>
+                  <p className="mt-1 font-mono text-xs text-foreground">{selectedAnomaly.detectedAt}</p>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-border/60 bg-secondary/30 p-4">
+                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Observation</p>
+                <p className="mt-2 text-sm leading-relaxed text-foreground">{selectedAnomaly.description}</p>
+                <p className="mt-2 font-mono text-xs text-primary">{selectedAnomaly.location}</p>
+              </div>
+
+              <div className="flex flex-wrap justify-end gap-2">
+                <Link
+                  href="/detections"
+                  onClick={() => setSelectedAnomaly(null)}
+                  className="inline-flex items-center gap-2 rounded-lg border border-border/70 bg-card/60 px-4 py-2 text-sm font-medium text-foreground hover:bg-secondary/60"
+                >
+                  Open Detections <ArrowRight className="size-4" />
+                </Link>
+                <Link
+                  href="/threat-response"
+                  onClick={() => setSelectedAnomaly(null)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                >
+                  Open Threat Response <ArrowRight className="size-4" />
+                </Link>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
