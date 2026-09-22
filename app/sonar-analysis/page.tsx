@@ -13,33 +13,136 @@ import {
   Layers,
   CheckCircle2,
   Loader2,
+  Cloud,
+  Database,
+  AlertTriangle,
 } from "lucide-react"
 import { Panel, PanelHeader } from "@/components/ui/panel"
 import { RiskBadge } from "@/components/dashboard/risk-badge"
 import { cn } from "@/lib/utils"
-import { sonarSamples, riskMeta, type BBox, type SonarSample } from "@/lib/mock-data"
+import { sonarSamples, riskMeta, type BBox, type Risk, type SonarSample } from "@/lib/mock-data"
+import { persistSonarAnalysisResults } from "@/lib/firestore"
 
-type Phase = "idle" | "analyzing" | "done"
+type Phase = "idle" | "analyzing" | "done" | "error"
+
+type InferenceResponse = {
+  image: { width: number; height: number }
+  model: string
+  detections: Array<{
+    classId: number
+    className: string
+    confidence: number
+    bbox: { x1: number; y1: number; x2: number; y2: number }
+  }>
+}
 
 const stages = [
   "Loading sonar tile & normalizing gain",
-  "Removing water-column & nadir artifacts",
-  "Running YOLO-Sonar v4 inference",
-  "Classifying contacts & estimating depth",
-  "Geo-referencing & scoring risk",
+  "Preparing image for YOLO inference",
+  "Running actual YOLO model",
+  "Converting model detections",
+  "Persisting contacts to Firestore",
 ]
 
-const boxColor: Record<string, string> = {
+const boxColor: Record<Risk, string> = {
   critical: "border-destructive shadow-[0_0_0_1px_var(--destructive)]",
   high: "border-warning shadow-[0_0_0_1px_var(--warning)]",
   medium: "border-primary shadow-[0_0_0_1px_var(--primary)]",
   low: "border-success shadow-[0_0_0_1px_var(--success)]",
 }
-const boxLabelBg: Record<string, string> = {
+
+const boxLabelBg: Record<Risk, string> = {
   critical: "bg-destructive text-destructive-foreground",
   high: "bg-warning text-warning-foreground",
   medium: "bg-primary text-primary-foreground",
   low: "bg-success text-success-foreground",
+}
+
+function parseBaseGps(location: string) {
+  const match = location.match(/([\d.]+)°\s*([NS]),\s*([\d.]+)°\s*([EW])/i)
+  if (!match) return { lat: 0, lng: 0 }
+
+  const lat = Number(match[1]) * (match[2].toUpperCase() === "S" ? -1 : 1)
+  const lng = Number(match[3]) * (match[4].toUpperCase() === "W" ? -1 : 1)
+  return { lat, lng }
+}
+
+function parseDepthRange(depthRange: string) {
+  const match = depthRange.replace(/[–—]/g, "-").match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/)
+  if (!match) return { min: 0, max: 0 }
+  return { min: Number(match[1]), max: Number(match[2]) }
+}
+
+function inferRisk(label: string, confidence: number): Risk {
+  const normalized = label.toLowerCase()
+
+  if (
+    confidence >= 0.8 &&
+    /(mine|ordnance|container|pipeline|shipwreck|wreck|barrel|hazard)/.test(normalized)
+  ) {
+    return "critical"
+  }
+
+  if (
+    confidence >= 0.65 &&
+    /(net|trap|debris|metal|tire|fragment|cable|rope)/.test(normalized)
+  ) {
+    return "high"
+  }
+
+  if (confidence >= 0.5) return "medium"
+  return "low"
+}
+
+function modelToBoxes(result: InferenceResponse, sample: SonarSample): BBox[] {
+  const gps = parseBaseGps(sample.location)
+  const depth = parseDepthRange(sample.depthRange)
+  const width = Math.max(result.image.width, 1)
+  const height = Math.max(result.image.height, 1)
+  const latMeters = 111_320
+  const lngMeters = 111_320 * Math.max(Math.cos((gps.lat * Math.PI) / 180), 0.1)
+
+  return result.detections.map((detection, index) => {
+    const x1 = Math.max(0, Math.min(width, detection.bbox.x1))
+    const y1 = Math.max(0, Math.min(height, detection.bbox.y1))
+    const x2 = Math.max(x1, Math.min(width, detection.bbox.x2))
+    const y2 = Math.max(y1, Math.min(height, detection.bbox.y2))
+
+    const x = x1 / width
+    const y = y1 / height
+    const w = Math.max((x2 - x1) / width, 0.005)
+    const h = Math.max((y2 - y1) / height, 0.005)
+    const centerX = (x1 + x2) / (2 * width)
+    const centerY = (y1 + y2) / (2 * height)
+
+    // Prototype georeferencing: uses the survey tile center and a 50 m image span.
+    // Replace this with navigation/sonar metadata when available.
+    const eastOffsetMeters = (centerX - 0.5) * 50
+    const northOffsetMeters = (0.5 - centerY) * 50
+    const estimatedLat = gps.lat + northOffsetMeters / latMeters
+    const estimatedLng = gps.lng + eastOffsetMeters / lngMeters
+
+    const estimatedDepth =
+      depth.min === depth.max
+        ? depth.min
+        : depth.min + (1 - centerY) * (depth.max - depth.min)
+
+    return {
+      id: `yolo-${index + 1}`,
+      label: detection.className,
+      confidence: detection.confidence,
+      depth: Number(estimatedDepth.toFixed(1)),
+      gps: {
+        lat: Number(estimatedLat.toFixed(6)),
+        lng: Number(estimatedLng.toFixed(6)),
+      },
+      risk: inferRisk(detection.className, detection.confidence),
+      x,
+      y,
+      w,
+      h,
+    }
+  })
 }
 
 export default function SonarAnalysisPage() {
@@ -49,310 +152,434 @@ export default function SonarAnalysisPage() {
   const [stage, setStage] = useState(0)
   const [revealed, setRevealed] = useState<BBox[]>([])
   const [active, setActive] = useState<string | null>(null)
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([])
+  const [syncState, setSyncState] = useState<"idle" | "saving" | "saved" | "error">("idle")
+  const [error, setError] = useState("")
+  const [modelName, setModelName] = useState("Actual YOLO model")
+  const abortRef = useRef<AbortController | null>(null)
+  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const clearTimers = () => {
-    timers.current.forEach(clearTimeout)
-    timers.current = []
+    if (progressTimerRef.current) {
+      clearInterval(progressTimerRef.current)
+      progressTimerRef.current = null
+    }
   }
 
   const reset = useCallback(() => {
     clearTimers()
+    abortRef.current?.abort()
+    abortRef.current = null
     setPhase("idle")
     setProgress(0)
     setStage(0)
     setRevealed([])
     setActive(null)
+    setSyncState("idle")
+    setError("")
   }, [])
 
-  const selectSample = (s: SonarSample) => {
-    if (s.id === selected.id) return
+  const selectSample = (sample: SonarSample) => {
+    if (sample.id === selected.id) return
     reset()
-    setSelected(s)
+    setSelected(sample)
   }
 
-  const analyze = () => {
+  const analyze = async () => {
     if (phase === "analyzing") return
+
     clearTimers()
     setPhase("analyzing")
-    setProgress(0)
+    setProgress(3)
     setStage(0)
     setRevealed([])
     setActive(null)
+    setSyncState("idle")
+    setError("")
 
-    const duration = 3200
-    const start = Date.now()
-    const interval = setInterval(() => {
-      const p = Math.min(100, ((Date.now() - start) / duration) * 100)
-      setProgress(p)
-      setStage(Math.min(stages.length - 1, Math.floor((p / 100) * stages.length)))
-      if (p >= 100) clearInterval(interval)
-    }, 40)
-    timers.current.push(interval as unknown as ReturnType<typeof setTimeout>)
+    try {
+      const sourceResponse = await fetch(selected.src, { cache: "no-store" })
+      if (!sourceResponse.ok) {
+        throw new Error(`Unable to load sonar image: HTTP ${sourceResponse.status}`)
+      }
 
-    // reveal boxes progressively
-    selected.boxes.forEach((b, i) => {
-      const t = setTimeout(
-        () => setRevealed((prev) => [...prev, b]),
-        duration + 250 + i * 400,
-      )
-      timers.current.push(t)
-    })
-    const done = setTimeout(() => setPhase("done"), duration + 250 + selected.boxes.length * 400 + 200)
-    timers.current.push(done)
+      setStage(1)
+      setProgress(10)
+
+      const imageBlob = await sourceResponse.blob()
+      const form = new FormData()
+      form.append("image", imageBlob, `${selected.id}.png`)
+      form.append("conf", "0.45")
+      form.append("iou", "0.70")
+      form.append("imgsz", "640")
+
+      abortRef.current = new AbortController()
+
+      let currentProgress = 10
+      progressTimerRef.current = setInterval(() => {
+        currentProgress = Math.min(90, currentProgress + 2)
+        setProgress(currentProgress)
+        setStage(
+          currentProgress < 25
+            ? 1
+            : currentProgress < 55
+              ? 2
+              : currentProgress < 78
+                ? 3
+                : 4,
+        )
+      }, 180)
+
+      const response = await fetch("/api/inference", {
+        method: "POST",
+        body: form,
+        signal: abortRef.current.signal,
+      })
+
+      const payload = await response.json()
+
+      clearTimers()
+
+      if (!response.ok) {
+        throw new Error(payload?.detail || "The YOLO inference service returned an error.")
+      }
+
+      const inference = payload as InferenceResponse
+      const boxes = modelToBoxes(inference, selected)
+
+      setModelName(inference.model || "Actual YOLO model")
+      setRevealed(boxes)
+      setProgress(92)
+      setStage(4)
+      setSyncState("saving")
+
+      await persistSonarAnalysisResults(selected.id, boxes)
+
+      setProgress(100)
+      setPhase("done")
+      setSyncState("saved")
+    } catch (analysisError) {
+      clearTimers()
+
+      if (analysisError instanceof DOMException && analysisError.name === "AbortError") {
+        return
+      }
+
+      setPhase("error")
+      setSyncState("error")
+      setError(analysisError instanceof Error ? analysisError.message : "YOLO analysis failed.")
+    } finally {
+      abortRef.current = null
+    }
   }
 
   useEffect(() => clearTimers, [])
 
-  const showBoxes = phase === "done" || (phase === "analyzing" && revealed.length > 0)
+  const showBoxes = revealed.length > 0
+  const statusText =
+    phase === "done"
+      ? syncState === "saved"
+        ? "RESULTS SYNCED"
+        : "ANALYSIS COMPLETE"
+      : phase === "error"
+        ? "INFERENCE ERROR"
+        : "ACTUAL YOLO INFERENCE"
 
   return (
-    <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
-      {/* Left: samples + controls */}
-      <div className="space-y-6 xl:col-span-1">
-        <Panel>
-          <PanelHeader title="Sample Imagery" subtitle="Select a Side-Scan Sonar tile" icon={<Layers className="size-4" />} />
-          <div className="space-y-3 p-4">
-            {sonarSamples.map((s) => (
-              <button
-                key={s.id}
-                onClick={() => selectSample(s)}
-                className={cn(
-                  "flex w-full items-center gap-3 rounded-lg border p-2 text-left transition-colors",
-                  selected.id === s.id
-                    ? "border-primary/50 bg-primary/10"
-                    : "border-border/60 bg-card/60 hover:bg-secondary/50",
-                )}
-              >
-                <div className="relative size-14 shrink-0 overflow-hidden rounded-md border border-border/60">
-                  <Image src={s.src || "/placeholder.svg"} alt={s.name} fill sizes="56px" className="object-cover" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-foreground">{s.name}</p>
-                  <p className="truncate font-mono text-[11px] text-muted-foreground">
-                    {s.id} · {s.depthRange}
-                  </p>
-                </div>
-                {selected.id === s.id ? <span className="size-2 rounded-full bg-primary" /> : null}
-              </button>
-            ))}
+    <div className="space-y-6">
+      <div className="flex flex-col gap-3 rounded-xl border border-border/60 bg-card/50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Cloud className="size-4" />
+          </span>
+          <div>
+            <p className="text-xs font-semibold text-foreground">Sonar Analysis → Actual YOLO → Firestore</p>
+            <p className="text-[11px] text-muted-foreground">
+              The selected sonar tile is sent to the local Python inference service and persisted after inference.
+            </p>
           </div>
-        </Panel>
-
-        <Panel>
-          <PanelHeader title="Inference Control" subtitle="YOLO-Sonar v4 · 640px" icon={<Cpu className="size-4" />} />
-          <div className="space-y-4 p-5">
-            <div className="grid grid-cols-2 gap-3 text-center">
-              <div className="rounded-lg border border-border/60 bg-secondary/40 p-3">
-                <p className="font-mono text-lg font-semibold text-primary">{selected.resolution}</p>
-                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Resolution</p>
-              </div>
-              <div className="rounded-lg border border-border/60 bg-secondary/40 p-3">
-                <p className="font-mono text-lg font-semibold text-primary">0.45</p>
-                <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Conf. Thresh</p>
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={analyze}
-                disabled={phase === "analyzing"}
-                className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
-              >
-                {phase === "analyzing" ? (
-                  <>
-                    <Loader2 className="size-4 animate-spin" /> Analyzing…
-                  </>
-                ) : (
-                  <>
-                    <Play className="size-4" /> Analyze
-                  </>
-                )}
-              </button>
-              <button
-                onClick={reset}
-                className="inline-flex items-center justify-center gap-2 rounded-lg border border-border/70 bg-card/60 px-3 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-secondary/60"
-                aria-label="Reset"
-              >
-                <RotateCcw className="size-4" />
-              </button>
-            </div>
-
-            {/* processing log */}
-            {phase !== "idle" ? (
-              <div className="space-y-2 rounded-lg border border-border/60 bg-secondary/30 p-3">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-mono text-muted-foreground">PROCESSING</span>
-                  <span className="font-mono text-primary">{Math.round(progress)}%</span>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
-                  <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${progress}%` }} />
-                </div>
-                <ul className="space-y-1 pt-1">
-                  {stages.map((s, i) => {
-                    const state = phase === "done" || i < stage ? "done" : i === stage ? "active" : "pending"
-                    return (
-                      <li key={s} className="flex items-center gap-2 text-xs">
-                        {state === "done" ? (
-                          <CheckCircle2 className="size-3.5 text-success" />
-                        ) : state === "active" ? (
-                          <Loader2 className="size-3.5 animate-spin text-primary" />
-                        ) : (
-                          <span className="size-3.5 rounded-full border border-border" />
-                        )}
-                        <span className={cn(state === "pending" ? "text-muted-foreground" : "text-foreground")}>{s}</span>
-                      </li>
-                    )
-                  })}
-                </ul>
-              </div>
-            ) : (
-              <p className="rounded-lg border border-dashed border-border/60 p-3 text-center text-xs text-muted-foreground">
-                Select a tile and run inference to detect underwater debris and anomalies.
-              </p>
-            )}
-          </div>
-        </Panel>
+        </div>
+        <span
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wide",
+            phase === "error"
+              ? "border-destructive/25 bg-destructive/10 text-destructive"
+              : "border-primary/25 bg-primary/10 text-primary",
+          )}
+        >
+          <span className={cn("size-1.5 rounded-full", phase === "error" ? "bg-destructive" : "bg-primary")} />
+          {statusText}
+        </span>
       </div>
 
-      {/* Right: viewer + results */}
-      <div className="space-y-6 xl:col-span-2">
-        <Panel className="overflow-hidden">
-          <PanelHeader
-            title={selected.name}
-            subtitle={`${selected.id} · ${selected.location}`}
-            icon={<Radar className="size-4" />}
-            action={
-              phase === "done" ? (
-                <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-0.5 text-xs font-medium text-success">
-                  <CheckCircle2 className="size-3" /> {revealed.length} contacts
-                </span>
-              ) : null
-            }
-          />
-          <div className="relative aspect-[2/1] w-full overflow-hidden bg-black">
-            <Image
-              src={selected.src || "/placeholder.svg"}
-              alt={`Side-scan sonar tile ${selected.name}`}
-              fill
-              sizes="(max-width: 1280px) 100vw, 66vw"
-              className="object-cover"
-              priority
-            />
-            {/* scanning overlay */}
-            {phase === "analyzing" ? (
-              <>
-                <div className="absolute inset-0 bg-primary/5" />
-                <div
-                  className="absolute inset-x-0 h-0.5 bg-primary shadow-[0_0_20px_4px_var(--primary)]"
-                  style={{ top: `${progress}%` }}
-                />
-                <div className="absolute left-3 top-3 rounded-md bg-background/70 px-2 py-1 font-mono text-[10px] text-primary backdrop-blur">
-                  SCANNING · {Math.round(progress)}%
-                </div>
-              </>
-            ) : null}
-
-            {/* bounding boxes */}
-            {showBoxes
-              ? revealed.map((b) => (
-                  <button
-                    key={b.id}
-                    onMouseEnter={() => setActive(b.id)}
-                    onMouseLeave={() => setActive(null)}
-                    onFocus={() => setActive(b.id)}
-                    onClick={() => setActive(b.id)}
-                    className={cn(
-                      "group absolute rounded border-2 transition-all",
-                      boxColor[b.risk],
-                      active && active !== b.id ? "opacity-50" : "opacity-100",
-                    )}
-                    style={{
-                      left: `${b.x * 100}%`,
-                      top: `${b.y * 100}%`,
-                      width: `${b.w * 100}%`,
-                      height: `${b.h * 100}%`,
-                    }}
-                  >
-                    <span
-                      className={cn(
-                        "absolute -top-5 left-0 whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[10px] font-medium",
-                        boxLabelBg[b.risk],
-                      )}
-                    >
-                      {b.label} {Math.round(b.confidence * 100)}%
-                    </span>
-                    <Crosshair className="absolute left-1/2 top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 text-current opacity-0 group-hover:opacity-100" />
-                  </button>
-                ))
-              : null}
-
-            {/* idle hint */}
-            {phase === "idle" ? (
-              <div className="absolute inset-0 flex items-center justify-center">
-                <div className="rounded-lg border border-primary/30 bg-background/70 px-4 py-2 text-center text-xs text-muted-foreground backdrop-blur">
-                  Press <span className="font-medium text-primary">Analyze</span> to run AI detection
-                </div>
-              </div>
-            ) : null}
+      {error ? (
+        <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <p className="font-medium">Actual YOLO inference is not available yet.</p>
+            <p className="mt-0.5 text-destructive/80">{error}</p>
+            <p className="mt-1 text-destructive/80">
+              Start the Python service and make sure the current model weights are available in inference/models or AQUASENTINEL_MODEL_PATH.
+            </p>
           </div>
-          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-border/60 px-5 py-3 font-mono text-[11px] text-muted-foreground">
-            <span>DEPTH {selected.depthRange}</span>
-            <span>GPS {selected.location}</span>
-            <span>FREQ 900 kHz</span>
-            <span>RANGE 50 m</span>
-          </div>
-        </Panel>
+        </div>
+      ) : null}
 
-        {/* Detected objects */}
-        <Panel>
-          <PanelHeader
-            title="Detected Objects"
-            subtitle="AI-classified contacts with geolocation & risk"
-            icon={<Crosshair className="size-4" />}
-          />
-          {phase === "done" || revealed.length > 0 ? (
-            <div className="divide-y divide-border/50">
-              {revealed.map((b) => (
-                <div
-                  key={b.id}
-                  onMouseEnter={() => setActive(b.id)}
-                  onMouseLeave={() => setActive(null)}
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <div className="space-y-6 xl:col-span-1">
+          <Panel>
+            <PanelHeader title="Sample Imagery" subtitle="Select a Side-Scan Sonar tile" icon={<Layers className="size-4" />} />
+            <div className="space-y-3 p-4">
+              {sonarSamples.map((sample) => (
+                <button
+                  key={sample.id}
+                  onClick={() => selectSample(sample)}
                   className={cn(
-                    "grid grid-cols-2 gap-3 px-5 py-4 transition-colors sm:grid-cols-5 sm:items-center",
-                    active === b.id ? "bg-primary/5" : "",
+                    "flex w-full items-center gap-3 rounded-lg border p-2 text-left transition-colors",
+                    selected.id === sample.id
+                      ? "border-primary/50 bg-primary/10"
+                      : "border-border/60 bg-card/60 hover:bg-secondary/50",
                   )}
                 >
-                  <div className="col-span-2 sm:col-span-1">
-                    <div className="flex items-center gap-2">
-                      <span className={cn("size-2.5 rounded-sm", riskMeta[b.risk].dot)} />
-                      <p className="text-sm font-medium text-foreground">{b.label}</p>
-                    </div>
-                    <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">{b.id.toUpperCase()}</p>
+                  <div className="relative size-14 shrink-0 overflow-hidden rounded-md border border-border/60">
+                    <Image src={sample.src || "/placeholder.svg"} alt={sample.name} fill sizes="56px" className="object-cover" />
                   </div>
-                  <Metric icon={<Gauge className="size-3.5" />} label="Confidence" value={`${Math.round(b.confidence * 100)}%`} />
-                  <Metric icon={<Layers className="size-3.5" />} label="Depth" value={`${b.depth} m`} />
-                  <Metric
-                    icon={<MapPin className="size-3.5" />}
-                    label="GPS"
-                    value={`${b.gps.lat.toFixed(4)}, ${b.gps.lng.toFixed(4)}`}
-                  />
-                  <div className="flex sm:justify-end">
-                    <RiskBadge risk={b.risk} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-foreground">{sample.name}</p>
+                    <p className="truncate font-mono text-[11px] text-muted-foreground">
+                      {sample.id} · {sample.depthRange}
+                    </p>
                   </div>
-                </div>
+                  {selected.id === sample.id ? <span className="size-2 rounded-full bg-primary" /> : null}
+                </button>
               ))}
             </div>
-          ) : (
-            <div className="flex flex-col items-center justify-center gap-2 p-10 text-center">
-              <div className="flex size-12 items-center justify-center rounded-full border border-border/60 bg-secondary/40 text-muted-foreground">
-                <Crosshair className="size-5" />
+          </Panel>
+
+          <Panel>
+            <PanelHeader title="Inference Control" subtitle={`${modelName} · 640px`} icon={<Cpu className="size-4" />} />
+            <div className="space-y-4 p-5">
+              <div className="grid grid-cols-2 gap-3 text-center">
+                <div className="rounded-lg border border-border/60 bg-secondary/40 p-3">
+                  <p className="font-mono text-lg font-semibold text-primary">{selected.resolution}</p>
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Resolution</p>
+                </div>
+                <div className="rounded-lg border border-border/60 bg-secondary/40 p-3">
+                  <p className="font-mono text-lg font-semibold text-primary">0.45</p>
+                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Conf. Thresh</p>
+                </div>
               </div>
-              <p className="text-sm text-muted-foreground">No detections yet</p>
-              <p className="text-xs text-muted-foreground">Run analysis to populate classified contacts.</p>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => void analyze()}
+                  disabled={phase === "analyzing"}
+                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+                >
+                  {phase === "analyzing" ? (
+                    <><Loader2 className="size-4 animate-spin" /> Running YOLO…</>
+                  ) : (
+                    <><Play className="size-4" /> Run YOLO Analysis</>
+                  )}
+                </button>
+
+                <button
+                  onClick={reset}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-border/70 bg-card/60 px-3 py-2.5 text-sm font-medium text-foreground transition-colors hover:bg-secondary/60"
+                  aria-label="Reset"
+                >
+                  <RotateCcw className="size-4" />
+                </button>
+              </div>
+
+              {phase !== "idle" ? (
+                <div className="space-y-2 rounded-lg border border-border/60 bg-secondary/30 p-3">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-mono text-muted-foreground">PROCESSING</span>
+                    <span className="font-mono text-primary">{Math.round(progress)}%</span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+                    <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${progress}%` }} />
+                  </div>
+                  <ul className="space-y-1 pt-1">
+                    {stages.map((stageName, index) => {
+                      const state =
+                        phase === "done" || (phase !== "error" && index < stage)
+                          ? "done"
+                          : index === stage && phase !== "error"
+                            ? "active"
+                            : "pending"
+
+                      return (
+                        <li key={stageName} className="flex items-center gap-2 text-xs">
+                          {state === "done" ? (
+                            <CheckCircle2 className="size-3.5 text-success" />
+                          ) : state === "active" ? (
+                            <Loader2 className="size-3.5 animate-spin text-primary" />
+                          ) : (
+                            <span className="size-3.5 rounded-full border border-border" />
+                          )}
+                          <span className={cn(state === "pending" ? "text-muted-foreground" : "text-foreground")}>{stageName}</span>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              ) : (
+                <p className="rounded-lg border border-dashed border-border/60 p-3 text-center text-xs text-muted-foreground">
+                  Run the actual local YOLO model against the selected Side-Scan Sonar tile.
+                </p>
+              )}
             </div>
-          )}
-        </Panel>
+          </Panel>
+        </div>
+
+        <div className="space-y-6 xl:col-span-2">
+          <Panel className="overflow-hidden">
+            <PanelHeader
+              title={selected.name}
+              subtitle={`${selected.id} · ${selected.location}`}
+              icon={<Radar className="size-4" />}
+              action={
+                phase === "done" ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 px-2.5 py-0.5 text-xs font-medium text-success">
+                    <CheckCircle2 className="size-3" /> {revealed.length} contacts
+                  </span>
+                ) : null
+              }
+            />
+            <div className="relative aspect-[2/1] w-full overflow-hidden bg-black">
+              <Image
+                src={selected.src || "/placeholder.svg"}
+                alt={`Side-scan sonar tile ${selected.name}`}
+                fill
+                sizes="(max-width: 1280px) 100vw, 66vw"
+                className="object-cover"
+                priority
+              />
+
+              {phase === "analyzing" ? (
+                <>
+                  <div className="absolute inset-0 bg-primary/5" />
+                  <div className="absolute inset-x-0 h-0.5 bg-primary shadow-[0_0_20px_4px_var(--primary)]" style={{ top: `${progress}%` }} />
+                  <div className="absolute left-3 top-3 rounded-md bg-background/70 px-2 py-1 font-mono text-[10px] text-primary backdrop-blur">
+                    YOLO INFERENCE · {Math.round(progress)}%
+                  </div>
+                </>
+              ) : null}
+
+              {showBoxes
+                ? revealed.map((box) => (
+                    <button
+                      key={box.id}
+                      onMouseEnter={() => setActive(box.id)}
+                      onMouseLeave={() => setActive(null)}
+                      onFocus={() => setActive(box.id)}
+                      onClick={() => setActive(box.id)}
+                      className={cn(
+                        "group absolute rounded border-2 transition-all",
+                        boxColor[box.risk],
+                        active && active !== box.id ? "opacity-50" : "opacity-100",
+                      )}
+                      style={{
+                        left: `${box.x * 100}%`,
+                        top: `${box.y * 100}%`,
+                        width: `${box.w * 100}%`,
+                        height: `${box.h * 100}%`,
+                      }}
+                    >
+                      <span className={cn("absolute -top-5 left-0 whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[10px] font-medium", boxLabelBg[box.risk])}>
+                        {box.label} {Math.round(box.confidence * 100)}%
+                      </span>
+                      <Crosshair className="absolute left-1/2 top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 text-current opacity-0 group-hover:opacity-100" />
+                    </button>
+                  ))
+                : null}
+
+              {phase === "idle" ? (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <div className="rounded-lg border border-primary/30 bg-background/70 px-4 py-2 text-center text-xs text-muted-foreground backdrop-blur">
+                    Press <span className="font-medium text-primary">Run YOLO Analysis</span> to detect contacts
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-border/60 px-5 py-3 font-mono text-[11px] text-muted-foreground">
+              <span>DEPTH {selected.depthRange}</span>
+              <span>GPS {selected.location}</span>
+              <span>FREQ 900 kHz</span>
+              <span>RANGE 50 m</span>
+            </div>
+          </Panel>
+
+          {syncState === "saved" ? (
+            <div className="flex items-center gap-2 rounded-xl border border-success/25 bg-success/10 px-4 py-3 text-xs text-success">
+              <Database className="size-4" />
+              Real YOLO detections have been synchronized to Firestore and are now available in Detections, the map and AquaFusion.
+            </div>
+          ) : null}
+
+          {syncState === "saving" ? (
+            <div className="flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-xs text-muted-foreground">
+              <Loader2 className="size-4 animate-spin text-primary" />
+              Saving real YOLO detections to Firestore…
+            </div>
+          ) : null}
+
+          <Panel>
+            <PanelHeader
+              title="Detected Objects"
+              subtitle="Real model output with prototype georeferencing & risk"
+              icon={<Crosshair className="size-4" />}
+            />
+            {showBoxes ? (
+              <div className="divide-y divide-border/50">
+                {revealed.map((box) => (
+                  <div
+                    key={box.id}
+                    onMouseEnter={() => setActive(box.id)}
+                    onMouseLeave={() => setActive(null)}
+                    className={cn(
+                      "grid grid-cols-2 gap-3 px-5 py-4 transition-colors sm:grid-cols-5 sm:items-center",
+                      active === box.id ? "bg-primary/5" : "",
+                    )}
+                  >
+                    <div className="col-span-2 sm:col-span-1">
+                      <div className="flex items-center gap-2">
+                        <span className={cn("size-2.5 rounded-sm", riskMeta[box.risk].dot)} />
+                        <p className="text-sm font-medium text-foreground">{box.label}</p>
+                      </div>
+                      <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">{box.id.toUpperCase()}</p>
+                    </div>
+                    <Metric icon={<Gauge className="size-3.5" />} label="Confidence" value={`${Math.round(box.confidence * 100)}%`} />
+                    <Metric icon={<Layers className="size-3.5" />} label="Depth (est.)" value={`${box.depth} m`} />
+                    <Metric
+                      icon={<MapPin className="size-3.5" />}
+                      label="GPS (est.)"
+                      value={`${box.gps.lat.toFixed(4)}, ${box.gps.lng.toFixed(4)}`}
+                    />
+                    <div className="flex sm:justify-end">
+                      <RiskBadge risk={box.risk} />
+                    </div>
+                  </div>
+                ))}
+                {revealed.length === 0 ? (
+                  <div className="px-5 py-10 text-center text-sm text-muted-foreground">
+                    The actual model returned no detections above the current confidence threshold.
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center gap-2 p-10 text-center">
+                <div className="flex size-12 items-center justify-center rounded-full border border-border/60 bg-secondary/40 text-muted-foreground">
+                  <Crosshair className="size-5" />
+                </div>
+                <p className="text-sm text-muted-foreground">No detections yet</p>
+                <p className="text-xs text-muted-foreground">Run the actual model to populate classified contacts.</p>
+              </div>
+            )}
+          </Panel>
+        </div>
       </div>
     </div>
   )

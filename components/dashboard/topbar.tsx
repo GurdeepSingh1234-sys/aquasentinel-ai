@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react"
 import Link from "next/link"
-import { usePathname } from "next/navigation"
+import { usePathname, useRouter } from "next/navigation"
 import { Search, Bell, Menu, X, Waves, Satellite } from "lucide-react"
 import {
   LayoutDashboard,
@@ -13,8 +13,11 @@ import {
   Navigation,
   FileText,
   Settings,
+  ShieldCheck,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { ThemeToggle } from "@/components/theme/theme-toggle"
+import { useAuth } from "@/components/auth/auth-provider"
 
 const titles: Record<string, { title: string; subtitle: string }> = {
   "/": { title: "Command Overview", subtitle: "Real-time marine surveillance & detection intelligence" },
@@ -24,6 +27,7 @@ const titles: Record<string, { title: string; subtitle: string }> = {
   "/anomalies": { title: "Anomalies", subtitle: "Non-standard acoustic signatures flagged by AI" },
   "/missions": { title: "Missions", subtitle: "AUV / ROV survey operations" },
   "/reports": { title: "Reports", subtitle: "Generated survey and incident documentation" },
+  "/threat-response": { title: "Threat Response", subtitle: "From AI detection to operational inspection action" },
   "/settings": { title: "Settings", subtitle: "System, detection model and fleet configuration" },
 }
 
@@ -35,11 +39,14 @@ const mobileNav = [
   { href: "/anomalies", label: "Anomalies", icon: TriangleAlert },
   { href: "/missions", label: "Missions", icon: Navigation },
   { href: "/reports", label: "Reports", icon: FileText },
+  { href: "/threat-response", label: "Threat Response", icon: ShieldCheck },
   { href: "/settings", label: "Settings", icon: Settings },
 ]
 
 export function Topbar() {
   const pathname = usePathname()
+  const router = useRouter()
+  const { user, signOut } = useAuth()
   const meta = titles[pathname] ?? { title: "AquaSentinel AI", subtitle: "" }
   const [open, setOpen] = useState(false)
   const [now, setNow] = useState<string>("")
@@ -57,6 +64,11 @@ export function Topbar() {
   useEffect(() => {
     setOpen(false)
   }, [pathname])
+
+  const handleSignOut = async () => {
+    await signOut()
+    router.replace("/login")
+  }
 
   return (
     <header className="sticky top-0 z-20 border-b border-border/60 bg-background/80 backdrop-blur-md">
@@ -94,15 +106,24 @@ export function Topbar() {
           <span className="absolute right-2 top-2 size-2 rounded-full bg-destructive ring-2 ring-background" />
         </button>
 
-        <div className="flex items-center gap-2.5 rounded-lg border border-border/60 bg-card/60 py-1 pl-1 pr-3">
+        <ThemeToggle />
+
+        <button
+          type="button"
+          onClick={() => {
+            void handleSignOut()
+          }}
+          className="group flex items-center gap-2.5 rounded-lg border border-border/60 bg-card/60 py-1 pl-1 pr-3 text-left transition-colors hover:bg-secondary/60"
+          title="Sign out"
+        >
           <div className="flex size-7 items-center justify-center rounded-md bg-primary/15 font-mono text-xs font-semibold text-primary">
-            AR
+            {user?.initials ?? "OP"}
           </div>
           <div className="hidden leading-tight sm:block">
-            <p className="text-xs font-medium text-foreground">Cmdr. A. Rao</p>
-            <p className="text-[10px] text-muted-foreground">Operations Lead</p>
+            <p className="text-xs font-medium text-foreground">{user?.name ?? "Operator"}</p>
+            <p className="text-[10px] text-muted-foreground group-hover:text-primary">Sign out</p>
           </div>
-        </div>
+        </button>
       </div>
 
       {open ? (
