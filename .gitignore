@@ -1,6 +1,6 @@
 # v0 sandbox internal files
 __v0_runtime_loader.js
-__v0_devtools.tsx
+__v0_devtools.ts
 __v0_jsx-dev-runtime.ts
 .snowflake/
 .v0-trash/
@@ -13,3 +13,10 @@ __v0_jsx-dev-runtime.ts
 node_modules
 .next/
 .DS_Store
+
+# Local AI model artifacts
+inference/models/*
+!inference/models/.gitkeep
+inference/.venv/
+__pycache__/
+*.pyc
