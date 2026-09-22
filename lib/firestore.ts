@@ -8,12 +8,18 @@ import {
   onSnapshot,
   serverTimestamp,
   setDoc,
+  writeBatch,
   type DocumentData,
   type Unsubscribe,
 } from "firebase/firestore"
 import type { User as FirebaseUser } from "firebase/auth"
 import { getFirebaseDb } from "@/lib/firebase"
-import { missions as seedMissions, type Mission } from "@/lib/mock-data"
+import {
+  detections as seedDetections,
+  missions as seedMissions,
+  type Detection,
+  type Mission,
+} from "@/lib/mock-data"
 
 export type OperatorProfile = {
   email: string
@@ -60,7 +66,6 @@ export async function getOperatorProfile(user: FirebaseUser): Promise<OperatorPr
       role: typeof data.role === "string" && data.role.trim() ? data.role : fallback.role,
     }
   } catch {
-    // Authentication should still work when Firestore rules have not been deployed yet.
     return fallback
   }
 }
@@ -116,25 +121,61 @@ function missionFromFirestore(data: DocumentData): Mission {
   }
 }
 
+function detectionFromFirestore(data: DocumentData): Detection {
+  return {
+    id: String(data.id ?? ""),
+    object: String(data.object ?? "Unknown Contact"),
+    category: data.category ?? "unknown",
+    confidence: Number(data.confidence ?? 0),
+    depth: Number(data.depth ?? 0),
+    gps: {
+      lat: Number(data.gps?.lat ?? 0),
+      lng: Number(data.gps?.lng ?? 0),
+    },
+    risk: data.risk ?? "low",
+    mission: String(data.mission ?? "—"),
+    timestamp: String(data.timestamp ?? ""),
+    status: data.status ?? "pending",
+  }
+}
+
 export async function seedMissionsIfEmpty() {
   const db = getFirebaseDb()
   const snapshot = await getDocs(collection(db, "missions"))
 
   if (!snapshot.empty) return false
 
-  await Promise.all(
-    seedMissions.map((mission) =>
-      setDoc(
-        doc(db, "missions", mission.id),
-        {
-          ...mission,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        },
-      ),
-    ),
-  )
+  const batch = writeBatch(db)
 
+  seedMissions.forEach((mission) => {
+    batch.set(doc(db, "missions", mission.id), {
+      ...mission,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  })
+
+  await batch.commit()
+  return true
+}
+
+export async function seedDetectionsIfEmpty() {
+  const db = getFirebaseDb()
+  const snapshot = await getDocs(collection(db, "detections"))
+
+  if (!snapshot.empty) return false
+
+  const batch = writeBatch(db)
+
+  seedDetections.forEach((detection) => {
+    batch.set(doc(db, "detections", detection.id), {
+      ...detection,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    })
+  })
+
+  await batch.commit()
   return true
 }
 
@@ -149,6 +190,24 @@ export function subscribeToMissions(
         .map((item) => missionFromFirestore(item.data()))
         .filter((mission) => Boolean(mission.id))
         .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+
+      onChange(rows)
+    },
+    (error) => onError?.(error),
+  )
+}
+
+export function subscribeToDetections(
+  onChange: (detections: Detection[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  return onSnapshot(
+    collection(getFirebaseDb(), "detections"),
+    (snapshot) => {
+      const rows = snapshot.docs
+        .map((item) => detectionFromFirestore(item.data()))
+        .filter((detection) => Boolean(detection.id))
+        .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
 
       onChange(rows)
     },
