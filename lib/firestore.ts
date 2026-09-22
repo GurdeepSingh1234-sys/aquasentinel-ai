@@ -1,6 +1,7 @@
 "use client"
 
 import {
+  addDoc,
   collection,
   doc,
   getDoc,
@@ -108,6 +109,32 @@ export async function writeOperatorDocument(
     },
     { merge: true },
   )
+}
+
+export async function recordOperatorFeedback({
+  uid,
+  detectionId,
+  action,
+  state,
+  risk,
+  confidence,
+}: {
+  uid: string
+  detectionId: string
+  action: "confirm" | "reject" | "rescan"
+  state: string
+  risk: string
+  confidence: number
+}) {
+  await addDoc(collection(getFirebaseDb(), "operatorFeedback"), {
+    uid,
+    detectionId,
+    action,
+    state,
+    risk,
+    confidence,
+    createdAt: serverTimestamp(),
+  })
 }
 
 function missionFromFirestore(data: DocumentData): Mission {
