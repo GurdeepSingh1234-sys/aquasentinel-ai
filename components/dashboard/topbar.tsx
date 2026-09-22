@@ -17,6 +17,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ThemeToggle } from "@/components/theme/theme-toggle"
+import { useAuth } from "@/components/auth/auth-provider"
 
 const titles: Record<string, { title: string; subtitle: string }> = {
   "/": { title: "Command Overview", subtitle: "Real-time marine surveillance & detection intelligence" },
@@ -45,6 +46,7 @@ const mobileNav = [
 export function Topbar() {
   const pathname = usePathname()
   const router = useRouter()
+  const { user, signOut } = useAuth()
   const meta = titles[pathname] ?? { title: "AquaSentinel AI", subtitle: "" }
   const [open, setOpen] = useState(false)
   const [now, setNow] = useState<string>("")
@@ -104,8 +106,7 @@ export function Topbar() {
         <button
           type="button"
           onClick={() => {
-            window.localStorage.removeItem("aquasentinel-auth")
-            window.sessionStorage.removeItem("aquasentinel-auth")
+            signOut()
             router.replace("/login")
           }}
           className="group flex items-center gap-2.5 rounded-lg border border-border/60 bg-card/60 py-1 pl-1 pr-3 text-left transition-colors hover:bg-secondary/60"
@@ -115,7 +116,7 @@ export function Topbar() {
             AR
           </div>
           <div className="hidden leading-tight sm:block">
-            <p className="text-xs font-medium text-foreground">Cmdr. A. Rao</p>
+            <p className="text-xs font-medium text-foreground">{user?.name ?? "Operator"}</p>
             <p className="text-[10px] text-muted-foreground group-hover:text-primary">Sign out</p>
           </div>
         </button>
