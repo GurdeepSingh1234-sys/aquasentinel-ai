@@ -18,9 +18,11 @@ import {
   anomalies as seedAnomalies,
   detections as seedDetections,
   missions as seedMissions,
+  reports as seedReports,
   type Anomaly,
   type Detection,
   type Mission,
+  type Report,
 } from "@/lib/mock-data"
 
 export type OperatorProfile = {
@@ -154,6 +156,18 @@ function anomalyFromFirestore(data: DocumentData): Anomaly {
   }
 }
 
+function reportFromFirestore(data: DocumentData): Report {
+  return {
+    id: String(data.id ?? ""),
+    title: String(data.title ?? "Untitled Report"),
+    type: data.type ?? "summary",
+    mission: String(data.mission ?? "—"),
+    generatedAt: String(data.generatedAt ?? ""),
+    size: String(data.size ?? "—"),
+    author: String(data.author ?? "AquaSentinel AI"),
+  }
+}
+
 async function seedCollectionIfEmpty(
   collectionName: string,
   records: Array<{ id: string } & Record<string, unknown>>,
@@ -229,6 +243,24 @@ export function subscribeToAnomalies(
   )
 }
 
+export function subscribeToReports(
+  onChange: (reports: Report[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  return onSnapshot(
+    collection(getFirebaseDb(), "reports"),
+    (snapshot) => {
+      const rows = snapshot.docs
+        .map((item) => reportFromFirestore(item.data()))
+        .filter((report) => Boolean(report.id))
+        .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt))
+
+      onChange(rows)
+    },
+    (error) => onError?.(error),
+  )
+}
+
 export function seedMissionsIfEmpty() {
   return seedCollectionIfEmpty("missions", seedMissions)
 }
@@ -239,4 +271,8 @@ export function seedDetectionsIfEmpty() {
 
 export function seedAnomaliesIfEmpty() {
   return seedCollectionIfEmpty("anomalies", seedAnomalies)
+}
+
+export function seedReportsIfEmpty() {
+  return seedCollectionIfEmpty("reports", seedReports)
 }
