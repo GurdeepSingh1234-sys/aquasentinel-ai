@@ -1,6 +1,7 @@
 "use client"
 
-import { FormEvent, useState } from "react"
+import { useState } from "react"
+import type { FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import { Eye, EyeOff, LockKeyhole, Mail, Waves, ArrowRight, ShieldCheck } from "lucide-react"
 
