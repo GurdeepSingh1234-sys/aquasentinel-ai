@@ -1,14 +1,19 @@
 "use client"
 
 import {
+  collection,
   doc,
   getDoc,
+  getDocs,
+  onSnapshot,
   serverTimestamp,
   setDoc,
   type DocumentData,
+  type Unsubscribe,
 } from "firebase/firestore"
 import type { User as FirebaseUser } from "firebase/auth"
 import { getFirebaseDb } from "@/lib/firebase"
+import { missions as seedMissions, type Mission } from "@/lib/mock-data"
 
 export type OperatorProfile = {
   email: string
@@ -83,15 +88,70 @@ export async function ensureOperatorProfile(user: FirebaseUser): Promise<Operato
 
 export async function writeOperatorDocument(
   uid: string,
-  collection: string,
+  collectionName: string,
   data: DocumentData,
 ) {
   await setDoc(
-    doc(getFirebaseDb(), collection, uid),
+    doc(getFirebaseDb(), collectionName, uid),
     {
       ...data,
       updatedAt: serverTimestamp(),
     },
     { merge: true },
+  )
+}
+
+function missionFromFirestore(data: DocumentData): Mission {
+  return {
+    id: String(data.id ?? ""),
+    name: String(data.name ?? "Untitled Mission"),
+    vehicle: String(data.vehicle ?? "Unknown Vehicle"),
+    status: data.status ?? "queued",
+    progress: Number(data.progress ?? 0),
+    area: String(data.area ?? "Unassigned"),
+    coverage: Number(data.coverage ?? 0),
+    detections: Number(data.detections ?? 0),
+    startedAt: String(data.startedAt ?? ""),
+    operator: String(data.operator ?? "Operator"),
+  }
+}
+
+export async function seedMissionsIfEmpty() {
+  const db = getFirebaseDb()
+  const snapshot = await getDocs(collection(db, "missions"))
+
+  if (!snapshot.empty) return false
+
+  await Promise.all(
+    seedMissions.map((mission) =>
+      setDoc(
+        doc(db, "missions", mission.id),
+        {
+          ...mission,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+      ),
+    ),
+  )
+
+  return true
+}
+
+export function subscribeToMissions(
+  onChange: (missions: Mission[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  return onSnapshot(
+    collection(getFirebaseDb(), "missions"),
+    (snapshot) => {
+      const rows = snapshot.docs
+        .map((item) => missionFromFirestore(item.data()))
+        .filter((mission) => Boolean(mission.id))
+        .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+
+      onChange(rows)
+    },
+    (error) => onError?.(error),
   )
 }
