@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { createContext, useContext, useEffect, useState } from "react"
 
 type Theme = "dark" | "light"
 
@@ -48,7 +48,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   )
 }
 
-import { createContext, useContext } from "react"
 
 type ThemeContextValue = {
   theme: Theme
