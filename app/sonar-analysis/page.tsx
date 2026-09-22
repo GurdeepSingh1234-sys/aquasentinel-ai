@@ -15,35 +15,134 @@ import {
   Loader2,
   Cloud,
   Database,
+  AlertTriangle,
 } from "lucide-react"
 import { Panel, PanelHeader } from "@/components/ui/panel"
 import { RiskBadge } from "@/components/dashboard/risk-badge"
 import { cn } from "@/lib/utils"
-import { sonarSamples, riskMeta, type BBox, type SonarSample } from "@/lib/mock-data"
+import { sonarSamples, riskMeta, type BBox, type Risk, type SonarSample } from "@/lib/mock-data"
 import { persistSonarAnalysisResults } from "@/lib/firestore"
 
-type Phase = "idle" | "analyzing" | "done"
+type Phase = "idle" | "analyzing" | "done" | "error"
+
+type InferenceResponse = {
+  image: { width: number; height: number }
+  model: string
+  detections: Array<{
+    classId: number
+    className: string
+    confidence: number
+    bbox: { x1: number; y1: number; x2: number; y2: number }
+  }>
+}
 
 const stages = [
   "Loading sonar tile & normalizing gain",
-  "Removing water-column & nadir artifacts",
-  "Running YOLO-Sonar v4 inference",
-  "Classifying contacts & estimating depth",
-  "Geo-referencing & scoring risk",
+  "Preparing image for YOLO inference",
+  "Running actual YOLO model",
+  "Converting model detections",
+  "Persisting contacts to Firestore",
 ]
 
-const boxColor: Record<string, string> = {
+const boxColor: Record<Risk, string> = {
   critical: "border-destructive shadow-[0_0_0_1px_var(--destructive)]",
   high: "border-warning shadow-[0_0_0_1px_var(--warning)]",
   medium: "border-primary shadow-[0_0_0_1px_var(--primary)]",
   low: "border-success shadow-[0_0_0_1px_var(--success)]",
 }
 
-const boxLabelBg: Record<string, string> = {
+const boxLabelBg: Record<Risk, string> = {
   critical: "bg-destructive text-destructive-foreground",
   high: "bg-warning text-warning-foreground",
   medium: "bg-primary text-primary-foreground",
   low: "bg-success text-success-foreground",
+}
+
+function parseBaseGps(location: string) {
+  const match = location.match(/([\d.]+)°\s*([NS]),\s*([\d.]+)°\s*([EW])/i)
+  if (!match) return { lat: 0, lng: 0 }
+
+  const lat = Number(match[1]) * (match[2].toUpperCase() === "S" ? -1 : 1)
+  const lng = Number(match[3]) * (match[4].toUpperCase() === "W" ? -1 : 1)
+  return { lat, lng }
+}
+
+function parseDepthRange(depthRange: string) {
+  const match = depthRange.replace(/[–—]/g, "-").match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/)
+  if (!match) return { min: 0, max: 0 }
+  return { min: Number(match[1]), max: Number(match[2]) }
+}
+
+function inferRisk(label: string, confidence: number): Risk {
+  const normalized = label.toLowerCase()
+
+  if (
+    confidence >= 0.8 &&
+    /(mine|ordnance|container|pipeline|shipwreck|wreck|barrel|hazard)/.test(normalized)
+  ) {
+    return "critical"
+  }
+
+  if (
+    confidence >= 0.65 &&
+    /(net|trap|debris|metal|tire|fragment|cable|rope)/.test(normalized)
+  ) {
+    return "high"
+  }
+
+  if (confidence >= 0.5) return "medium"
+  return "low"
+}
+
+function modelToBoxes(result: InferenceResponse, sample: SonarSample): BBox[] {
+  const gps = parseBaseGps(sample.location)
+  const depth = parseDepthRange(sample.depthRange)
+  const width = Math.max(result.image.width, 1)
+  const height = Math.max(result.image.height, 1)
+  const latMeters = 111_320
+  const lngMeters = 111_320 * Math.max(Math.cos((gps.lat * Math.PI) / 180), 0.1)
+
+  return result.detections.map((detection, index) => {
+    const x1 = Math.max(0, Math.min(width, detection.bbox.x1))
+    const y1 = Math.max(0, Math.min(height, detection.bbox.y1))
+    const x2 = Math.max(x1, Math.min(width, detection.bbox.x2))
+    const y2 = Math.max(y1, Math.min(height, detection.bbox.y2))
+
+    const x = x1 / width
+    const y = y1 / height
+    const w = Math.max((x2 - x1) / width, 0.005)
+    const h = Math.max((y2 - y1) / height, 0.005)
+    const centerX = (x1 + x2) / (2 * width)
+    const centerY = (y1 + y2) / (2 * height)
+
+    // Prototype georeferencing: uses the survey tile center and a 50 m image span.
+    // Replace this with navigation/sonar metadata when available.
+    const eastOffsetMeters = (centerX - 0.5) * 50
+    const northOffsetMeters = (0.5 - centerY) * 50
+    const estimatedLat = gps.lat + northOffsetMeters / latMeters
+    const estimatedLng = gps.lng + eastOffsetMeters / lngMeters
+
+    const estimatedDepth =
+      depth.min === depth.max
+        ? depth.min
+        : depth.min + (1 - centerY) * (depth.max - depth.min)
+
+    return {
+      id: `yolo-${index + 1}`,
+      label: detection.className,
+      confidence: detection.confidence,
+      depth: Number(estimatedDepth.toFixed(1)),
+      gps: {
+        lat: Number(estimatedLat.toFixed(6)),
+        lng: Number(estimatedLng.toFixed(6)),
+      },
+      risk: inferRisk(detection.className, detection.confidence),
+      x,
+      y,
+      w,
+      h,
+    }
+  })
 }
 
 export default function SonarAnalysisPage() {
@@ -54,21 +153,29 @@ export default function SonarAnalysisPage() {
   const [revealed, setRevealed] = useState<BBox[]>([])
   const [active, setActive] = useState<string | null>(null)
   const [syncState, setSyncState] = useState<"idle" | "saving" | "saved" | "error">("idle")
-  const timers = useRef<ReturnType<typeof setTimeout>[]>([])
+  const [error, setError] = useState("")
+  const [modelName, setModelName] = useState("Actual YOLO model")
+  const abortRef = useRef<AbortController | null>(null)
+  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const clearTimers = () => {
-    timers.current.forEach(clearTimeout)
-    timers.current = []
+    if (progressTimerRef.current) {
+      clearInterval(progressTimerRef.current)
+      progressTimerRef.current = null
+    }
   }
 
   const reset = useCallback(() => {
     clearTimers()
+    abortRef.current?.abort()
+    abortRef.current = null
     setPhase("idle")
     setProgress(0)
     setStage(0)
     setRevealed([])
     setActive(null)
     setSyncState("idle")
+    setError("")
   }, [])
 
   const selectSample = (sample: SonarSample) => {
@@ -77,54 +184,105 @@ export default function SonarAnalysisPage() {
     setSelected(sample)
   }
 
-  const analyze = () => {
+  const analyze = async () => {
     if (phase === "analyzing") return
 
     clearTimers()
     setPhase("analyzing")
-    setProgress(0)
+    setProgress(3)
     setStage(0)
     setRevealed([])
     setActive(null)
     setSyncState("idle")
+    setError("")
 
-    const duration = 3200
-    const start = Date.now()
-    const interval = setInterval(() => {
-      const percent = Math.min(100, ((Date.now() - start) / duration) * 100)
-      setProgress(percent)
-      setStage(Math.min(stages.length - 1, Math.floor((percent / 100) * stages.length)))
-      if (percent >= 100) clearInterval(interval)
-    }, 40)
+    try {
+      const sourceResponse = await fetch(selected.src, { cache: "no-store" })
+      if (!sourceResponse.ok) {
+        throw new Error(`Unable to load sonar image: HTTP ${sourceResponse.status}`)
+      }
 
-    timers.current.push(interval as unknown as ReturnType<typeof setTimeout>)
+      setStage(1)
+      setProgress(10)
 
-    selected.boxes.forEach((box, index) => {
-      const timer = setTimeout(
-        () => setRevealed((previous) => [...previous, box]),
-        duration + 250 + index * 400,
-      )
-      timers.current.push(timer)
-    })
+      const imageBlob = await sourceResponse.blob()
+      const form = new FormData()
+      form.append("image", imageBlob, `${selected.id}.png`)
+      form.append("conf", "0.45")
+      form.append("iou", "0.70")
+      form.append("imgsz", "640")
 
-    const done = setTimeout(async () => {
-      setPhase("done")
+      abortRef.current = new AbortController()
+
+      let currentProgress = 10
+      progressTimerRef.current = setInterval(() => {
+        currentProgress = Math.min(90, currentProgress + 2)
+        setProgress(currentProgress)
+        setStage(
+          currentProgress < 25
+            ? 1
+            : currentProgress < 55
+              ? 2
+              : currentProgress < 78
+                ? 3
+                : 4,
+        )
+      }, 180)
+
+      const response = await fetch("/api/inference", {
+        method: "POST",
+        body: form,
+        signal: abortRef.current.signal,
+      })
+
+      const payload = await response.json()
+
+      clearTimers()
+
+      if (!response.ok) {
+        throw new Error(payload?.detail || "The YOLO inference service returned an error.")
+      }
+
+      const inference = payload as InferenceResponse
+      const boxes = modelToBoxes(inference, selected)
+
+      setModelName(inference.model || "Actual YOLO model")
+      setRevealed(boxes)
+      setProgress(92)
+      setStage(4)
       setSyncState("saving")
 
-      try {
-        await persistSonarAnalysisResults(selected.id, selected.boxes)
-        setSyncState("saved")
-      } catch {
-        setSyncState("error")
-      }
-    }, duration + 250 + selected.boxes.length * 400 + 200)
+      await persistSonarAnalysisResults(selected.id, boxes)
 
-    timers.current.push(done)
+      setProgress(100)
+      setPhase("done")
+      setSyncState("saved")
+    } catch (analysisError) {
+      clearTimers()
+
+      if (analysisError instanceof DOMException && analysisError.name === "AbortError") {
+        return
+      }
+
+      setPhase("error")
+      setSyncState("error")
+      setError(analysisError instanceof Error ? analysisError.message : "YOLO analysis failed.")
+    } finally {
+      abortRef.current = null
+    }
   }
 
   useEffect(() => clearTimers, [])
 
-  const showBoxes = phase === "done" || (phase === "analyzing" && revealed.length > 0)
+  const showBoxes = revealed.length > 0
+  const statusText =
+    phase === "done"
+      ? syncState === "saved"
+        ? "RESULTS SYNCED"
+        : "ANALYSIS COMPLETE"
+      : phase === "error"
+        ? "INFERENCE ERROR"
+        : "ACTUAL YOLO INFERENCE"
 
   return (
     <div className="space-y-6">
@@ -134,17 +292,37 @@ export default function SonarAnalysisPage() {
             <Cloud className="size-4" />
           </span>
           <div>
-            <p className="text-xs font-semibold text-foreground">Sonar Analysis → Firestore</p>
+            <p className="text-xs font-semibold text-foreground">Sonar Analysis → Actual YOLO → Firestore</p>
             <p className="text-[11px] text-muted-foreground">
-              Completed analysis results are persisted to the authenticated detection registry.
+              The selected sonar tile is sent to the local Python inference service and persisted after inference.
             </p>
           </div>
         </div>
-        <span className="inline-flex items-center gap-1.5 self-start rounded-full border border-primary/25 bg-primary/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wide text-primary sm:self-auto">
-          <span className="size-1.5 animate-pulse rounded-full bg-primary" />
-          {syncState === "saved" ? "Results synced" : "Analysis ready"}
+        <span
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wide",
+            phase === "error"
+              ? "border-destructive/25 bg-destructive/10 text-destructive"
+              : "border-primary/25 bg-primary/10 text-primary",
+          )}
+        >
+          <span className={cn("size-1.5 rounded-full", phase === "error" ? "bg-destructive" : "bg-primary")} />
+          {statusText}
         </span>
       </div>
+
+      {error ? (
+        <div className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+          <div>
+            <p className="font-medium">Actual YOLO inference is not available yet.</p>
+            <p className="mt-0.5 text-destructive/80">{error}</p>
+            <p className="mt-1 text-destructive/80">
+              Start the Python service and make sure the current model weights are available in inference/models or AQUASENTINEL_MODEL_PATH.
+            </p>
+          </div>
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="space-y-6 xl:col-span-1">
@@ -178,7 +356,7 @@ export default function SonarAnalysisPage() {
           </Panel>
 
           <Panel>
-            <PanelHeader title="Inference Control" subtitle="YOLO-Sonar v4 · 640px" icon={<Cpu className="size-4" />} />
+            <PanelHeader title="Inference Control" subtitle={`${modelName} · 640px`} icon={<Cpu className="size-4" />} />
             <div className="space-y-4 p-5">
               <div className="grid grid-cols-2 gap-3 text-center">
                 <div className="rounded-lg border border-border/60 bg-secondary/40 p-3">
@@ -193,18 +371,14 @@ export default function SonarAnalysisPage() {
 
               <div className="flex gap-2">
                 <button
-                  onClick={analyze}
+                  onClick={() => void analyze()}
                   disabled={phase === "analyzing"}
                   className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
                 >
                   {phase === "analyzing" ? (
-                    <>
-                      <Loader2 className="size-4 animate-spin" /> Analyzing…
-                    </>
+                    <><Loader2 className="size-4 animate-spin" /> Running YOLO…</>
                   ) : (
-                    <>
-                      <Play className="size-4" /> Analyze
-                    </>
+                    <><Play className="size-4" /> Run YOLO Analysis</>
                   )}
                 </button>
 
@@ -228,7 +402,13 @@ export default function SonarAnalysisPage() {
                   </div>
                   <ul className="space-y-1 pt-1">
                     {stages.map((stageName, index) => {
-                      const state = phase === "done" || index < stage ? "done" : index === stage ? "active" : "pending"
+                      const state =
+                        phase === "done" || (phase !== "error" && index < stage)
+                          ? "done"
+                          : index === stage && phase !== "error"
+                            ? "active"
+                            : "pending"
+
                       return (
                         <li key={stageName} className="flex items-center gap-2 text-xs">
                           {state === "done" ? (
@@ -246,7 +426,7 @@ export default function SonarAnalysisPage() {
                 </div>
               ) : (
                 <p className="rounded-lg border border-dashed border-border/60 p-3 text-center text-xs text-muted-foreground">
-                  Select a tile and run inference to detect underwater debris and anomalies.
+                  Run the actual local YOLO model against the selected Side-Scan Sonar tile.
                 </p>
               )}
             </div>
@@ -280,12 +460,9 @@ export default function SonarAnalysisPage() {
               {phase === "analyzing" ? (
                 <>
                   <div className="absolute inset-0 bg-primary/5" />
-                  <div
-                    className="absolute inset-x-0 h-0.5 bg-primary shadow-[0_0_20px_4px_var(--primary)]"
-                    style={{ top: `${progress}%` }}
-                  />
+                  <div className="absolute inset-x-0 h-0.5 bg-primary shadow-[0_0_20px_4px_var(--primary)]" style={{ top: `${progress}%` }} />
                   <div className="absolute left-3 top-3 rounded-md bg-background/70 px-2 py-1 font-mono text-[10px] text-primary backdrop-blur">
-                    SCANNING · {Math.round(progress)}%
+                    YOLO INFERENCE · {Math.round(progress)}%
                   </div>
                 </>
               ) : null}
@@ -310,12 +487,7 @@ export default function SonarAnalysisPage() {
                         height: `${box.h * 100}%`,
                       }}
                     >
-                      <span
-                        className={cn(
-                          "absolute -top-5 left-0 whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[10px] font-medium",
-                          boxLabelBg[box.risk],
-                        )}
-                      >
+                      <span className={cn("absolute -top-5 left-0 whitespace-nowrap rounded px-1.5 py-0.5 font-mono text-[10px] font-medium", boxLabelBg[box.risk])}>
                         {box.label} {Math.round(box.confidence * 100)}%
                       </span>
                       <Crosshair className="absolute left-1/2 top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 text-current opacity-0 group-hover:opacity-100" />
@@ -326,7 +498,7 @@ export default function SonarAnalysisPage() {
               {phase === "idle" ? (
                 <div className="absolute inset-0 flex items-center justify-center">
                   <div className="rounded-lg border border-primary/30 bg-background/70 px-4 py-2 text-center text-xs text-muted-foreground backdrop-blur">
-                    Press <span className="font-medium text-primary">Analyze</span> to run AI detection
+                    Press <span className="font-medium text-primary">Run YOLO Analysis</span> to detect contacts
                   </div>
                 </div>
               ) : null}
@@ -343,30 +515,24 @@ export default function SonarAnalysisPage() {
           {syncState === "saved" ? (
             <div className="flex items-center gap-2 rounded-xl border border-success/25 bg-success/10 px-4 py-3 text-xs text-success">
               <Database className="size-4" />
-              Analysis results have been synchronized to Firestore and are now available in Detections, the map and AquaFusion.
+              Real YOLO detections have been synchronized to Firestore and are now available in Detections, the map and AquaFusion.
             </div>
           ) : null}
 
           {syncState === "saving" ? (
             <div className="flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-xs text-muted-foreground">
               <Loader2 className="size-4 animate-spin text-primary" />
-              Saving detected contacts to Firestore…
-            </div>
-          ) : null}
-
-          {syncState === "error" ? (
-            <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-xs text-destructive">
-              Analysis completed, but the detected contacts could not be synchronized to Firestore.
+              Saving real YOLO detections to Firestore…
             </div>
           ) : null}
 
           <Panel>
             <PanelHeader
               title="Detected Objects"
-              subtitle="AI-classified contacts with geolocation & risk"
+              subtitle="Real model output with prototype georeferencing & risk"
               icon={<Crosshair className="size-4" />}
             />
-            {phase === "done" || revealed.length > 0 ? (
+            {showBoxes ? (
               <div className="divide-y divide-border/50">
                 {revealed.map((box) => (
                   <div
@@ -386,10 +552,10 @@ export default function SonarAnalysisPage() {
                       <p className="mt-0.5 font-mono text-[11px] text-muted-foreground">{box.id.toUpperCase()}</p>
                     </div>
                     <Metric icon={<Gauge className="size-3.5" />} label="Confidence" value={`${Math.round(box.confidence * 100)}%`} />
-                    <Metric icon={<Layers className="size-3.5" />} label="Depth" value={`${box.depth} m`} />
+                    <Metric icon={<Layers className="size-3.5" />} label="Depth (est.)" value={`${box.depth} m`} />
                     <Metric
                       icon={<MapPin className="size-3.5" />}
-                      label="GPS"
+                      label="GPS (est.)"
                       value={`${box.gps.lat.toFixed(4)}, ${box.gps.lng.toFixed(4)}`}
                     />
                     <div className="flex sm:justify-end">
@@ -397,6 +563,11 @@ export default function SonarAnalysisPage() {
                     </div>
                   </div>
                 ))}
+                {revealed.length === 0 ? (
+                  <div className="px-5 py-10 text-center text-sm text-muted-foreground">
+                    The actual model returned no detections above the current confidence threshold.
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className="flex flex-col items-center justify-center gap-2 p-10 text-center">
@@ -404,7 +575,7 @@ export default function SonarAnalysisPage() {
                   <Crosshair className="size-5" />
                 </div>
                 <p className="text-sm text-muted-foreground">No detections yet</p>
-                <p className="text-xs text-muted-foreground">Run analysis to populate classified contacts.</p>
+                <p className="text-xs text-muted-foreground">Run the actual model to populate classified contacts.</p>
               </div>
             )}
           </Panel>
