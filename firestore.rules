@@ -1,0 +1,55 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+
+      // New client-created profiles must stay at the least-privileged Operator role.
+      allow create: if isOwner(uid)
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == "Operator";
+
+      // Operators can update their own profile, but cannot self-promote roles.
+      allow update: if isOwner(uid)
+        && request.resource.data.email == resource.data.email
+        && request.resource.data.role == resource.data.role;
+
+      allow delete: if false;
+    }
+
+    // Shared operational data is available only to authenticated operators.
+    // Fine-grained role-based writes can be introduced with trusted server claims later.
+    match /missions/{missionId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /detections/{detectionId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /anomalies/{anomalyId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /reports/{reportId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /operatorFeedback/{feedbackId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
