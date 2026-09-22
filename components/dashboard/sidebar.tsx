@@ -11,6 +11,7 @@ import {
   Navigation,
   FileText,
   Settings,
+  ShieldCheck,
   Waves,
   Circle,
 } from "lucide-react"
@@ -24,6 +25,7 @@ const nav = [
   { href: "/anomalies", label: "Anomalies", icon: TriangleAlert },
   { href: "/missions", label: "Missions", icon: Navigation },
   { href: "/reports", label: "Reports", icon: FileText },
+  { href: "/threat-response", label: "Threat Response", icon: ShieldCheck },
   { href: "/settings", label: "Settings", icon: Settings },
 ]
 
