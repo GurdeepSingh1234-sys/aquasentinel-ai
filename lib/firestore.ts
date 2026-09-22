@@ -21,6 +21,7 @@ import {
   missions as seedMissions,
   reports as seedReports,
   type Anomaly,
+  type BBox,
   type Detection,
   type Mission,
   type Report,
@@ -30,6 +31,37 @@ export type OperatorProfile = {
   email: string
   name: string
   role: "Operator" | "Analyst" | string
+}
+
+export type OperatorSettings = {
+  threshold: number
+  model: string
+  autoReport: boolean
+  realtime: boolean
+  criticalAlerts: boolean
+  emailDigest: boolean
+  gpuAccel: boolean
+}
+
+export const DEFAULT_OPERATOR_SETTINGS: OperatorSettings = {
+  threshold: 45,
+  model: "YOLO-Sonar v4",
+  autoReport: true,
+  realtime: true,
+  criticalAlerts: true,
+  emailDigest: false,
+  gpuAccel: true,
+}
+
+export type OperatorFeedbackEntry = {
+  id: string
+  uid: string
+  detectionId: string
+  action: "confirm" | "reject" | "rescan"
+  state: string
+  risk: string
+  confidence: number
+  createdAt: string
 }
 
 function fallbackProfile(user: FirebaseUser): OperatorProfile {
@@ -111,6 +143,31 @@ export async function writeOperatorDocument(
   )
 }
 
+export async function getOperatorSettings(uid: string): Promise<OperatorSettings> {
+  try {
+    const snapshot = await getDoc(doc(getFirebaseDb(), "users", uid))
+    const saved = snapshot.exists() ? snapshot.data()?.preferences : undefined
+
+    return {
+      ...DEFAULT_OPERATOR_SETTINGS,
+      ...(saved && typeof saved === "object" ? saved : {}),
+    } as OperatorSettings
+  } catch {
+    return DEFAULT_OPERATOR_SETTINGS
+  }
+}
+
+export async function saveOperatorSettings(uid: string, settings: OperatorSettings) {
+  await setDoc(
+    doc(getFirebaseDb(), "users", uid),
+    {
+      preferences: settings,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  )
+}
+
 export async function recordOperatorFeedback({
   uid,
   detectionId,
@@ -135,6 +192,79 @@ export async function recordOperatorFeedback({
     confidence,
     createdAt: serverTimestamp(),
   })
+}
+
+export function subscribeToOperatorFeedback(
+  uid: string,
+  onChange: (entries: OperatorFeedbackEntry[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  return onSnapshot(
+    collection(getFirebaseDb(), "operatorFeedback"),
+    (snapshot) => {
+      const rows = snapshot.docs
+        .map((item) => {
+          const data = item.data()
+          const createdAt = data.createdAt?.toDate?.()
+          return {
+            id: item.id,
+            uid: String(data.uid ?? ""),
+            detectionId: String(data.detectionId ?? ""),
+            action: data.action ?? "rescan",
+            state: String(data.state ?? "unknown"),
+            risk: String(data.risk ?? "low"),
+            confidence: Number(data.confidence ?? 0),
+            createdAt: createdAt ? createdAt.toISOString() : "",
+          } satisfies OperatorFeedbackEntry
+        })
+        .filter((entry) => entry.uid === uid)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 8)
+
+      onChange(rows)
+    },
+    (error) => onError?.(error),
+  )
+}
+
+function categoryForSonarLabel(label: string): Detection["category"] {
+  const normalized = label.toLowerCase()
+  if (normalized.includes("unknown")) return "unknown"
+  if (normalized.includes("pipeline")) return "structure"
+  if (normalized.includes("shipwreck") || normalized.includes("container")) return "structure"
+  if (normalized.includes("barrel")) return "hazard"
+  if (normalized.includes("net") || normalized.includes("tire") || normalized.includes("trap")) return "debris"
+  return "debris"
+}
+
+export async function persistSonarAnalysisResults(sampleId: string, boxes: BBox[]) {
+  const db = getFirebaseDb()
+  const batch = writeBatch(db)
+
+  boxes.forEach((box) => {
+    const id = `SONAR-${sampleId}-${box.id}`
+    batch.set(
+      doc(db, "detections", id),
+      {
+        id,
+        object: box.label,
+        category: categoryForSonarLabel(box.label),
+        confidence: box.confidence,
+        depth: box.depth,
+        gps: box.gps,
+        risk: box.risk,
+        mission: sampleId,
+        timestamp: new Date().toISOString(),
+        status: "pending",
+        source: "sonar-analysis",
+        sourceSample: sampleId,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    )
+  })
+
+  await batch.commit()
 }
 
 function missionFromFirestore(data: DocumentData): Mission {
