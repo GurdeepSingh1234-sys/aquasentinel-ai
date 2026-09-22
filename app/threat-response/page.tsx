@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
-import { Navigation, ShieldAlert, Route, MapPin, Cloud, Loader2, CheckCircle2, RefreshCw, XCircle } from "lucide-react"
+import { Navigation, ShieldAlert, Route, MapPin, Cloud, Loader2, CheckCircle2, RefreshCw, XCircle, History } from "lucide-react"
 import { Panel, PanelHeader } from "@/components/ui/panel"
 import { RiskBadge } from "@/components/dashboard/risk-badge"
 import { ThreatResponsePanel } from "@/components/dashboard/response-panel"
@@ -10,7 +10,7 @@ import { IntelligenceCard } from "@/components/dashboard/intelligence-card"
 import { bboxEvidence, fuseEvidence } from "@/lib/aquafusion"
 import { buildThreatResponse } from "@/lib/threat-response"
 import type { Detection } from "@/lib/mock-data"
-import { recordOperatorFeedback, subscribeToDetections } from "@/lib/firestore"
+import { recordOperatorFeedback, subscribeToDetections, subscribeToOperatorFeedback, type OperatorFeedbackEntry } from "@/lib/firestore"
 import { useAuth } from "@/components/auth/auth-provider"
 
 const riskWeight: Record<Detection["risk"], number> = {
@@ -39,6 +39,7 @@ function offsetStart(point: { lat: number; lng: number }) {
 export default function ThreatResponsePage() {
   const { user } = useAuth()
   const [detections, setDetections] = useState<Detection[]>([])
+  const [feedbackEntries, setFeedbackEntries] = useState<OperatorFeedbackEntry[]>([])
   const [selectedId, setSelectedId] = useState("")
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
@@ -47,7 +48,8 @@ export default function ThreatResponsePage() {
 
   useEffect(() => {
     let active = true
-    return subscribeToDetections(
+
+    const unsubscribe = subscribeToDetections(
       (rows) => {
         if (!active) return
         setDetections(rows)
@@ -60,7 +62,22 @@ export default function ThreatResponsePage() {
         setLoading(false)
       },
     )
+
+    return () => {
+      active = false
+      unsubscribe()
+    }
   }, [])
+
+  useEffect(() => {
+    if (!user) return
+
+    return subscribeToOperatorFeedback(
+      user.uid,
+      (entries) => setFeedbackEntries(entries),
+      (feedbackError) => setError(feedbackError.message || "Unable to load operator decision history."),
+    )
+  }, [user])
 
   const selected = useMemo(
     () => detections.find((detection) => detection.id === selectedId) ?? chooseTarget(detections),
@@ -71,6 +88,7 @@ export default function ThreatResponsePage() {
     if (!selected) return null
 
     const evidence = bboxEvidence(selected.confidence, 0.16, 0.12)
+
     return fuseEvidence({
       modelConfidence: selected.confidence,
       shapeScore: evidence.shapeScore,
@@ -98,11 +116,7 @@ export default function ThreatResponsePage() {
         radiusMeters: detection.risk === "critical" ? 95 : detection.risk === "high" ? 70 : 45,
       }))
 
-    return buildThreatResponse(
-      start,
-      target,
-      threats,
-    )
+    return buildThreatResponse(start, target, threats)
   }, [detections, selected])
 
   const candidateRows = useMemo(
@@ -121,6 +135,7 @@ export default function ThreatResponsePage() {
 
     setSaving(true)
     setFeedback("")
+
     try {
       await recordOperatorFeedback({
         uid: user.uid,
@@ -130,6 +145,7 @@ export default function ThreatResponsePage() {
         risk: intelligence.risk,
         confidence: intelligence.finalConfidence,
       })
+
       setFeedback(
         action === "confirm"
           ? `Operator confirmed ${selected.id} for response.`
@@ -148,8 +164,7 @@ export default function ThreatResponsePage() {
     return (
       <div className="flex min-h-72 items-center justify-center rounded-xl border border-border/60 bg-card/40">
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="size-4 animate-spin text-primary" />
-          Loading live detections…
+          <Loader2 className="size-4 animate-spin text-primary" /> Loading live detections…
         </div>
       </div>
     )
@@ -178,8 +193,7 @@ export default function ThreatResponsePage() {
           </div>
         </div>
         <span className="inline-flex items-center gap-1.5 self-start rounded-full border border-success/25 bg-success/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-wide text-success sm:self-auto">
-          <span className="size-1.5 animate-pulse rounded-full bg-success" />
-          Connected
+          <span className="size-1.5 animate-pulse rounded-full bg-success" /> Connected
         </span>
       </div>
 
@@ -193,8 +207,7 @@ export default function ThreatResponsePage() {
         <div className="grid gap-6 p-6 lg:grid-cols-[1.2fr_0.8fr]">
           <div>
             <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-destructive/25 bg-destructive/10 px-3 py-1 text-xs font-medium text-destructive">
-              <ShieldAlert className="size-3.5" />
-              LIVE RESPONSE
+              <ShieldAlert className="size-3.5" /> LIVE RESPONSE
             </div>
             <h2 className="text-2xl font-semibold tracking-tight text-foreground">
               {selected.object} → operational response
@@ -220,12 +233,8 @@ export default function ThreatResponsePage() {
               {response.note} Human review remains part of the decision loop.
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
-              <Link
-                href="/detection-map"
-                className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground"
-              >
-                <MapPin className="size-4" />
-                Open Detection Map
+              <Link href="/detection-map" className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground">
+                <MapPin className="size-4" /> Open Detection Map
               </Link>
               <span className="inline-flex items-center gap-2 rounded-lg border border-border/60 px-4 py-2 text-xs text-muted-foreground">
                 <Route className="size-3.5" /> {response.route.length} waypoints
@@ -272,37 +281,45 @@ export default function ThreatResponsePage() {
       <ThreatResponsePanel response={response} />
 
       <Panel>
-        <PanelHeader
-          title="Operator Decision Log"
-          subtitle="Human-in-the-loop verification stored in Cloud Firestore"
-          icon={<Navigation className="size-4" />}
-        />
+        <PanelHeader title="Operator Decision Log" subtitle="Human-in-the-loop verification stored in Cloud Firestore" icon={<Navigation className="size-4" />} />
         <div className="p-5">
           <div className="grid gap-3 sm:grid-cols-3">
-            <ActionButton
-              icon={<CheckCircle2 className="size-4" />}
-              label="Confirm response"
-              onClick={() => void takeAction("confirm")}
-              disabled={saving}
-            />
-            <ActionButton
-              icon={<RefreshCw className="size-4" />}
-              label="Request rescan"
-              onClick={() => void takeAction("rescan")}
-              disabled={saving}
-            />
-            <ActionButton
-              icon={<XCircle className="size-4" />}
-              label="Reject alert"
-              onClick={() => void takeAction("reject")}
-              disabled={saving}
-            />
+            <ActionButton icon={<CheckCircle2 className="size-4" />} label="Confirm response" onClick={() => void takeAction("confirm")} disabled={saving} />
+            <ActionButton icon={<RefreshCw className="size-4" />} label="Request rescan" onClick={() => void takeAction("rescan")} disabled={saving} />
+            <ActionButton icon={<XCircle className="size-4" />} label="Reject alert" onClick={() => void takeAction("reject")} disabled={saving} />
           </div>
+
           {feedback ? (
             <div className="mt-3 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
               {feedback}
             </div>
           ) : null}
+
+          {feedbackEntries.length > 0 ? (
+            <div className="mt-5 rounded-xl border border-border/60 bg-secondary/20">
+              <div className="flex items-center gap-2 border-b border-border/60 px-4 py-3">
+                <History className="size-4 text-primary" />
+                <p className="text-xs font-semibold text-foreground">Recent decisions</p>
+              </div>
+              <div className="divide-y divide-border/50">
+                {feedbackEntries.map((entry) => (
+                  <div key={entry.id} className="grid gap-2 px-4 py-3 text-xs sm:grid-cols-[1fr_auto_auto_auto] sm:items-center">
+                    <div>
+                      <p className="font-medium text-foreground">{entry.detectionId}</p>
+                      <p className="text-[11px] text-muted-foreground">{entry.createdAt ? new Date(entry.createdAt).toLocaleString() : "Just now"}</p>
+                    </div>
+                    <span className="capitalize text-muted-foreground">{entry.action}</span>
+                    <span className="font-mono text-primary">{Math.round(entry.confidence * 100)}%</span>
+                    <RiskBadge risk={entry.risk as Detection["risk"]} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-5 rounded-xl border border-dashed border-border/60 px-4 py-5 text-center text-xs text-muted-foreground">
+              No operator decisions have been recorded for this account yet.
+            </div>
+          )}
         </div>
       </Panel>
 
