@@ -4,13 +4,12 @@ import { useState } from "react"
 import type { FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import { ThemeToggle } from "@/components/theme/theme-toggle"
-import { getDemoCredentials, useAuth } from "@/components/auth/auth-provider"
-import { Eye, EyeOff, LockKeyhole, Mail, Waves, ArrowRight, ShieldCheck } from "lucide-react"
+import { useAuth } from "@/components/auth/auth-provider"
+import { Eye, EyeOff, LockKeyhole, Mail, Waves, ArrowRight, ShieldCheck, Database } from "lucide-react"
 
 export default function LoginPage() {
   const router = useRouter()
-  const { signIn } = useAuth()
-  const { email: DEMO_EMAIL, password: DEMO_PASSWORD } = getDemoCredentials()
+  const { signIn, initializationError } = useAuth()
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [remember, setRemember] = useState(true)
@@ -105,6 +104,12 @@ export default function LoginPage() {
                 </p>
               </div>
 
+              {initializationError ? (
+                <div className="mb-5 rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-xs leading-relaxed text-destructive">
+                  Firebase configuration is incomplete. Add the values from your Firebase Web App to <span className="font-mono">.env.local</span>, then restart the Next.js dev server.
+                </div>
+              ) : null}
+
               <form onSubmit={handleSubmit} className="space-y-5">
                 <label className="block">
                   <span className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -158,7 +163,10 @@ export default function LoginPage() {
                     />
                     Remember this device
                   </label>
-                  <span className="text-xs text-primary/80">Operations Portal</span>
+                  <span className="inline-flex items-center gap-1.5 text-xs text-primary/80">
+                    <ShieldCheck className="size-3.5" />
+                    Firebase Auth
+                  </span>
                 </div>
 
                 {error ? (
@@ -169,7 +177,7 @@ export default function LoginPage() {
 
                 <button
                   type="submit"
-                  disabled={loading}
+                  disabled={loading || Boolean(initializationError)}
                   className="inline-flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 text-sm font-semibold text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {loading ? "Signing in…" : "Sign in"}
@@ -177,14 +185,13 @@ export default function LoginPage() {
                 </button>
               </form>
 
-              <div className="mt-7 rounded-xl border border-primary/20 bg-primary/5 p-4">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Demo credentials</p>
-                <div className="mt-2 space-y-1 font-mono text-xs text-muted-foreground">
-                  <p>Email: <span className="text-foreground">{DEMO_EMAIL}</span></p>
-                  <p>Password: <span className="text-foreground">{DEMO_PASSWORD}</span></p>
+              <div className="mt-7 rounded-xl border border-border/60 bg-secondary/20 p-4">
+                <div className="flex items-center gap-2">
+                  <Database className="size-4 text-primary" />
+                  <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Operator access</p>
                 </div>
-                <p className="mt-2 text-[10px] leading-relaxed text-muted-foreground">
-                  Prototype authentication for the SIH demo. Replace with a real auth provider before production deployment.
+                <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                  Use the operator account created in Firebase Authentication. Your authenticated session is used to access AquaSentinel operational data stored in Cloud Firestore.
                 </p>
               </div>
             </div>
