@@ -15,8 +15,10 @@ import {
 import type { User as FirebaseUser } from "firebase/auth"
 import { getFirebaseDb } from "@/lib/firebase"
 import {
+  anomalies as seedAnomalies,
   detections as seedDetections,
   missions as seedMissions,
+  type Anomaly,
   type Detection,
   type Mission,
 } from "@/lib/mock-data"
@@ -139,37 +141,31 @@ function detectionFromFirestore(data: DocumentData): Detection {
   }
 }
 
-export async function seedMissionsIfEmpty() {
-  const db = getFirebaseDb()
-  const snapshot = await getDocs(collection(db, "missions"))
-
-  if (!snapshot.empty) return false
-
-  const batch = writeBatch(db)
-
-  seedMissions.forEach((mission) => {
-    batch.set(doc(db, "missions", mission.id), {
-      ...mission,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    })
-  })
-
-  await batch.commit()
-  return true
+function anomalyFromFirestore(data: DocumentData): Anomaly {
+  return {
+    id: String(data.id ?? ""),
+    type: String(data.type ?? "Unknown Anomaly"),
+    description: String(data.description ?? ""),
+    severity: data.severity ?? "low",
+    confidence: Number(data.confidence ?? 0),
+    location: String(data.location ?? "Unknown"),
+    detectedAt: String(data.detectedAt ?? ""),
+    status: data.status ?? "new",
+  }
 }
 
-export async function seedDetectionsIfEmpty() {
+async function seedCollectionIfEmpty(
+  collectionName: string,
+  records: Array<{ id: string } & Record<string, unknown>>,
+) {
   const db = getFirebaseDb()
-  const snapshot = await getDocs(collection(db, "detections"))
-
+  const snapshot = await getDocs(collection(db, collectionName))
   if (!snapshot.empty) return false
 
   const batch = writeBatch(db)
-
-  seedDetections.forEach((detection) => {
-    batch.set(doc(db, "detections", detection.id), {
-      ...detection,
+  records.forEach((record) => {
+    batch.set(doc(db, collectionName, record.id), {
+      ...record,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     })
@@ -213,4 +209,34 @@ export function subscribeToDetections(
     },
     (error) => onError?.(error),
   )
+}
+
+export function subscribeToAnomalies(
+  onChange: (anomalies: Anomaly[]) => void,
+  onError?: (error: Error) => void,
+): Unsubscribe {
+  return onSnapshot(
+    collection(getFirebaseDb(), "anomalies"),
+    (snapshot) => {
+      const rows = snapshot.docs
+        .map((item) => anomalyFromFirestore(item.data()))
+        .filter((anomaly) => Boolean(anomaly.id))
+        .sort((a, b) => b.detectedAt.localeCompare(a.detectedAt))
+
+      onChange(rows)
+    },
+    (error) => onError?.(error),
+  )
+}
+
+export function seedMissionsIfEmpty() {
+  return seedCollectionIfEmpty("missions", seedMissions)
+}
+
+export function seedDetectionsIfEmpty() {
+  return seedCollectionIfEmpty("detections", seedDetections)
+}
+
+export function seedAnomaliesIfEmpty() {
+  return seedCollectionIfEmpty("anomalies", seedAnomalies)
 }
