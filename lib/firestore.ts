@@ -19,14 +19,17 @@ export type OperatorProfile = {
 function fallbackProfile(user: FirebaseUser): OperatorProfile {
   const email = user.email ?? ""
   const localPart = email.split("@")[0] || "Operator"
-
-  return {
-    email,
-    name: user.displayName ?? localPart
+  const displayName = user.displayName?.trim()
+  const derivedName =
+    localPart
       .split(/[._-]+/)
       .filter(Boolean)
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-      .join(" ") || "Operator",
+      .join(" ") || "Operator"
+
+  return {
+    email,
+    name: displayName || derivedName,
     role: "Operator",
   }
 }
@@ -83,8 +86,12 @@ export async function writeOperatorDocument(
   collection: string,
   data: DocumentData,
 ) {
-  await setDoc(doc(getFirebaseDb(), collection, uid), {
-    ...data,
-    updatedAt: serverTimestamp(),
-  }, { merge: true })
+  await setDoc(
+    doc(getFirebaseDb(), collection, uid),
+    {
+      ...data,
+      updatedAt: serverTimestamp(),
+    },
+    { merge: true },
+  )
 }
