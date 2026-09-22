@@ -4,35 +4,35 @@ import { useEffect, useState } from "react"
 import { usePathname, useRouter } from "next/navigation"
 import { Sidebar } from "@/components/dashboard/sidebar"
 import { Topbar } from "@/components/dashboard/topbar"
-
-const hasSession = () =>
-  typeof window !== "undefined" &&
-  (window.localStorage.getItem("aquasentinel-auth") === "true" ||
-    window.sessionStorage.getItem("aquasentinel-auth") === "true")
+import { useAuth } from "@/components/auth/auth-provider"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()
   const router = useRouter()
+  const { user, loading } = useAuth()
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
-    const authenticated = hasSession()
+    if (loading) return
 
     if (pathname === "/login") {
-      if (authenticated) router.replace("/")
-      else setReady(true)
+      if (user) {
+        router.replace("/")
+        return
+      }
+      setReady(true)
       return
     }
 
-    if (!authenticated) {
+    if (!user) {
       router.replace("/login")
       return
     }
 
     setReady(true)
-  }, [pathname, router])
+  }, [loading, pathname, router, user])
 
-  if (!ready) {
+  if (loading || !ready) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background text-muted-foreground">
         <div className="flex items-center gap-2 text-sm">
