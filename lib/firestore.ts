@@ -7,9 +7,11 @@ import {
   getDoc,
   getDocs,
   onSnapshot,
+  query,
   serverTimestamp,
   setDoc,
   writeBatch,
+  where,
   type DocumentData,
   type Unsubscribe,
 } from "firebase/firestore"
@@ -200,7 +202,7 @@ export function subscribeToOperatorFeedback(
   onError?: (error: Error) => void,
 ): Unsubscribe {
   return onSnapshot(
-    collection(getFirebaseDb(), "operatorFeedback"),
+    query(collection(getFirebaseDb(), "operatorFeedback"), where("uid", "==", uid)),
     (snapshot) => {
       const rows = snapshot.docs
         .map((item) => {
