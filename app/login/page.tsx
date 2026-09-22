@@ -3,13 +3,14 @@
 import { useState } from "react"
 import type { FormEvent } from "react"
 import { useRouter } from "next/navigation"
+import { ThemeToggle } from "@/components/theme/theme-toggle"
+import { getDemoCredentials, useAuth } from "@/components/auth/auth-provider"
 import { Eye, EyeOff, LockKeyhole, Mail, Waves, ArrowRight, ShieldCheck } from "lucide-react"
-
-const DEMO_EMAIL = "operator@aquasentinel.ai"
-const DEMO_PASSWORD = "Aqua@123"
 
 export default function LoginPage() {
   const router = useRouter()
+  const { signIn } = useAuth()
+  const { email: DEMO_EMAIL, password: DEMO_PASSWORD } = getDemoCredentials()
   const [email, setEmail] = useState(DEMO_EMAIL)
   const [password, setPassword] = useState(DEMO_PASSWORD)
   const [remember, setRemember] = useState(true)
@@ -28,27 +29,21 @@ export default function LoginPage() {
 
     setLoading(true)
 
-    window.setTimeout(() => {
-      if (email.trim().toLowerCase() !== DEMO_EMAIL || password !== DEMO_PASSWORD) {
-        setLoading(false)
-        setError("Invalid demo credentials. Use the credentials shown below.")
+    void signIn(email, password, remember).then((result) => {
+      setLoading(false)
+
+      if (!result.ok) {
+        setError(result.error ?? "Unable to sign in.")
         return
       }
 
-      if (remember) {
-        window.localStorage.setItem("aquasentinel-auth", "true")
-        window.sessionStorage.removeItem("aquasentinel-auth")
-      } else {
-        window.sessionStorage.setItem("aquasentinel-auth", "true")
-        window.localStorage.removeItem("aquasentinel-auth")
-      }
-
       router.replace("/")
-    }, 450)
+    })
   }
 
   return (
     <main className="relative flex min-h-screen overflow-hidden bg-background">
+      <div className="absolute right-5 top-5 z-10"><ThemeToggle /></div>
       <div className="absolute inset-0 grid-sonar opacity-60" />
       <div className="absolute -left-24 top-1/4 size-80 rounded-full bg-primary/10 blur-3xl" />
       <div className="absolute -right-24 bottom-1/4 size-96 rounded-full bg-accent/10 blur-3xl" />
