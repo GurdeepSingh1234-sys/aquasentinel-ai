@@ -1,8 +1,8 @@
 import { Analytics } from "@vercel/analytics/next"
 import type { Metadata, Viewport } from "next"
 import { Geist, Geist_Mono } from "next/font/google"
-import { Sidebar } from "@/components/dashboard/sidebar"
-import { Topbar } from "@/components/dashboard/topbar"
+import { AppShell } from "@/components/auth/app-shell"
+import { ThemeProvider } from "@/components/theme/theme-provider"
 import "./globals.css"
 
 const geistSans = Geist({ subsets: ["latin"], variable: "--font-geist-sans" })
@@ -16,7 +16,7 @@ export const metadata: Metadata = {
 }
 
 export const viewport: Viewport = {
-  colorScheme: "dark",
+  colorScheme: "dark light",
   themeColor: "#0b1420",
 }
 
@@ -26,15 +26,11 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en" className={`dark bg-background ${geistSans.variable} ${geistMono.variable}`}>
+    <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`} suppressHydrationWarning>
       <body className="font-sans antialiased">
-        <div className="min-h-screen">
-          <Sidebar />
-          <div className="lg:pl-64">
-            <Topbar />
-            <main className="mx-auto max-w-[1600px] px-4 py-6 sm:px-6">{children}</main>
-          </div>
-        </div>
+        <ThemeProvider>
+          <AppShell>{children}</AppShell>
+        </ThemeProvider>
         {process.env.NODE_ENV === "production" && <Analytics />}
       </body>
     </html>
